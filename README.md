@@ -357,6 +357,22 @@ uv run scripts/run.py \
 
 Update the eval config accordingly when evaluating newly trained checkpoints.
 
+### Quick Evaluation Scripts
+
+We provide convenience scripts for running evaluations:
+
+**Single episode:**
+```bash
+./run_bridge_eval.sh
+```
+
+**Multiple episodes (10 runs with different seeds):**
+```bash
+./run_bridge_eval_multi.sh
+```
+
+This runs 10 episodes and reports the success rate. Results are logged to `/tmp/episode_*.log`.
+
 ### Inference Speed
 
 | Setup | Time | Peak VRAM |
