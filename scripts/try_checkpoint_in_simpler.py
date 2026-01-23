@@ -75,7 +75,7 @@ def main(args):
         "episode_id": episode_id,  # this determines the obj inits in bridge
     }
     obs, reset_info = env.reset(options=env_reset_options)
-    instruction = env.get_language_instruction()
+    instruction = env.unwrapped.get_language_instruction()
     if args.recording:
         os.environ["TOKENIZERS_PARALLELISM"] = (
             "false"  # avoid tokenizer forking warning about deadlock
@@ -127,7 +127,7 @@ def main(args):
             video_writer.append_data(env_adapter.get_video_frame(env, obs))
 
         # update instruction in long horizon tasks, e.g., pick apple ---> put in top drawer
-        new_instruction = env.get_language_instruction()
+        new_instruction = env.unwrapped.get_language_instruction()
         if new_instruction != instruction:
             instruction = new_instruction
 

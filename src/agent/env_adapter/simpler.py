@@ -71,7 +71,7 @@ class SimplerAdapter(BaseEnvAdapter):
         model_inputs = self.processor(text=[instruction], images=images)
 
         # process proprio depending on the robot
-        raw_proprio = self.preprocess_proprio(obs)
+        raw_proprio = self.preprocess_proprio(obs, env)
 
         # normalize proprios - gripper opening is normalized
         if self.proprio_normalization_type == "bound":
@@ -164,7 +164,7 @@ class BridgeSimplerAdapter(SimplerAdapter):
     def reset(self):
         super().reset()
 
-    def preprocess_proprio(self, obs: dict) -> np.array:
+    def preprocess_proprio(self, obs: dict, env=None) -> np.array:
         # convert ee rotation to the frame of top-down
         proprio = obs["agent"]["eef_pos"]
         rm_bridge = quat2mat(proprio[3:7])
