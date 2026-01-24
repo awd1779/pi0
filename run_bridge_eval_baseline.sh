@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run open-pi-zero Bridge evaluation on SimplerEnv (with CGVD)
+# Run open-pi-zero Bridge evaluation on SimplerEnv (BASELINE - no CGVD)
 #
 # Available tasks:
 # WidowX (Bridge) - use with bridge_beta.pt:
@@ -27,15 +27,12 @@ mkdir -p $VLA_LOG_DIR
 
 cd /home/ubuntu/open-pi-zero
 
-# Run evaluation on spoon_on_towel task with CGVD
+# Run evaluation WITHOUT CGVD (baseline) with same distractors for fair comparison
 xvfb-run -a -s "-screen 0 1024x768x24" uv run python scripts/try_checkpoint_in_simpler.py \
     --task widowx_spoon_on_towel \
     --checkpoint_path /home/ubuntu/open-pi-zero/checkpoints/bridge_beta.pt \
     --num_episodes 10 \
     --distractors apple orange sponge \
     --recording \
-    --output_dir videos/cgvd \
-    --use_bf16 \
-    --use_cgvd \
-    --cgvd_verbose \
-    --cgvd_save_debug
+    --output_dir videos/baseline \
+    --use_bf16

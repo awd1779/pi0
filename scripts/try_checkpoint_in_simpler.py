@@ -13,6 +13,32 @@ from src.model.vla.pizero import PiZeroInference
 from src.utils.monitor import log_allocated_gpu_memory, log_execution_time
 
 
+def wrap_env_with_cgvd(env, args):
+    """Wrap environment with CGVD wrapper if enabled."""
+    if not args.use_cgvd:
+        return env
+
+    from src.cgvd import CGVDWrapper
+
+    print(f"[CGVD] Wrapping environment with CGVD wrapper")
+    print(f"[CGVD]   blur_sigma={args.cgvd_blur_sigma}")
+    print(f"[CGVD]   update_freq={args.cgvd_update_freq}")
+    print(f"[CGVD]   presence_threshold={args.cgvd_presence_threshold}")
+    print(f"[CGVD]   use_mock_segmenter={args.cgvd_use_mock}")
+
+    return CGVDWrapper(
+        env,
+        update_freq=args.cgvd_update_freq,
+        blur_sigma=args.cgvd_blur_sigma,
+        presence_threshold=args.cgvd_presence_threshold,
+        use_mock_segmenter=args.cgvd_use_mock,
+        feather_edges=args.cgvd_feather_edges,
+        include_robot=True,  # Always include robot arm
+        verbose=args.cgvd_verbose,
+        save_debug_images=args.cgvd_save_debug,
+    )
+
+
 @log_execution_time()
 def load_checkpoint(model, path):
     """load to cpu first, then move to gpu"""
@@ -21,6 +47,93 @@ def load_checkpoint(model, path):
     data["model"] = {k.replace("_orig_mod.", ""): v for k, v in data["model"].items()}
     model.load_state_dict(data["model"], strict=True)
     print(f"Loaded model from {path}")
+
+
+def run_episode(args, env, env_adapter, model, cfg, device, dtype, episode_idx):
+    """Run a single episode and return (success, steps, inference_times)."""
+    env_adapter.reset()
+
+    # Use different episode_id for each run to get variety
+    episode_id = (args.seed + episode_idx) % 21
+    env_reset_options = {}
+    env_reset_options["obj_init_options"] = {
+        "episode_id": episode_id,  # this determines the obj inits in bridge
+    }
+    obs, reset_info = env.reset(options=env_reset_options)
+    instruction = env.unwrapped.get_language_instruction()
+
+    video_writer = None
+    if args.recording:
+        os.environ["TOKENIZERS_PARALLELISM"] = (
+            "false"  # avoid tokenizer forking warning about deadlock
+        )
+        os.makedirs(args.output_dir, exist_ok=True)
+        suffix = "_cgvd" if args.use_cgvd else "_baseline"
+        video_path = os.path.join(args.output_dir, f"try_{args.task}{suffix}_ep{episode_idx}.mp4")
+        video_writer = imageio.get_writer(video_path)
+
+    print(f"\n--- Episode {episode_idx + 1}/{args.num_episodes} (id={episode_id}) ---")
+    print(f"Instruction: {instruction}")
+
+    cnt_step = 0
+    inference_times = []
+    success = False
+
+    while True:
+        # infer action chunk
+        inputs = env_adapter.preprocess(env, obs, instruction)
+        causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
+            model.build_causal_mask_and_position_ids(
+                inputs["attention_mask"], dtype=dtype
+            )
+        )
+        image_text_proprio_mask, action_mask = model.split_full_mask_into_submasks(
+            causal_mask
+        )
+        inputs = {
+            "input_ids": inputs["input_ids"],
+            "pixel_values": inputs["pixel_values"].to(dtype),
+            "image_text_proprio_mask": image_text_proprio_mask,
+            "action_mask": action_mask,
+            "vlm_position_ids": vlm_position_ids,
+            "proprio_position_ids": proprio_position_ids,
+            "action_position_ids": action_position_ids,
+            "proprios": inputs["proprios"].to(dtype),
+        }
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        start_inference_time = time.time()
+        with torch.inference_mode():  # speeds up
+            actions = model(**inputs)
+        if cnt_step > 0:
+            inference_times.append(time.time() - start_inference_time)
+        env_actions = env_adapter.postprocess(actions[0].float().cpu().numpy())
+
+        # environment step
+        for env_action in env_actions[: cfg.act_steps]:
+            obs, reward, success, truncated, info = env.step(env_action)
+            cnt_step += 1
+            if truncated:
+                break
+
+        # save frame
+        if video_writer is not None:
+            video_writer.append_data(env_adapter.get_video_frame(env, obs))
+
+        # update instruction in long horizon tasks, e.g., pick apple ---> put in top drawer
+        new_instruction = env.unwrapped.get_language_instruction()
+        if new_instruction != instruction:
+            instruction = new_instruction
+
+        # original octo eval only done when timeout, i.e., not upon success
+        if truncated:
+            if video_writer is not None:
+                video_writer.close()
+            break
+
+    result_str = "SUCCESS" if success else "FAILED"
+    print(f"Episode {episode_idx + 1}: {result_str} (steps={cnt_step})")
+
+    return success, cnt_step, inference_times
 
 
 def main(args):
@@ -64,94 +177,54 @@ def main(args):
     # simpler env
     env = simpler_env.make(args.task)
 
+    # Add distractors if specified
+    if args.distractors:
+        from src.cgvd.distractor_wrapper import DistractorWrapper
+        env = DistractorWrapper(env, args.distractors)
+        print(f"[Distractors] Added: {args.distractors}")
+
+    # optionally wrap with CGVD (after distractors so it sees the cluttered scene)
+    env = wrap_env_with_cgvd(env, args)
+
     # env specifics
     env_adapter = hydra.utils.instantiate(cfg.env.adapter)
-    env_adapter.reset()
 
-    # run an episode
-    episode_id = random.randint(0, 20)
-    env_reset_options = {}
-    env_reset_options["obj_init_options"] = {
-        "episode_id": episode_id,  # this determines the obj inits in bridge
-    }
-    obs, reset_info = env.reset(options=env_reset_options)
-    instruction = env.unwrapped.get_language_instruction()
-    if args.recording:
-        os.environ["TOKENIZERS_PARALLELISM"] = (
-            "false"  # avoid tokenizer forking warning about deadlock
+    # run episodes
+    successes = []
+    all_steps = []
+    all_inference_times = []
+
+    for ep_idx in range(args.num_episodes):
+        success, steps, inference_times = run_episode(
+            args, env, env_adapter, model, cfg, device, dtype, ep_idx
         )
-        video_writer = imageio.get_writer(f"try_{args.task}_{episode_id}.mp4")
-    print(
-        f"Reset info: {reset_info} Instruction: {instruction} Max episode length: {env.spec.max_episode_steps}"
-    )
-    cnt_step = 0
-    inference_times = []
-    while 1:
-        # infer action chunk
-        inputs = env_adapter.preprocess(env, obs, instruction)
-        causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
-            model.build_causal_mask_and_position_ids(
-                inputs["attention_mask"], dtype=dtype
-            )
-        )
-        image_text_proprio_mask, action_mask = model.split_full_mask_into_submasks(
-            causal_mask
-        )
-        inputs = {
-            "input_ids": inputs["input_ids"],
-            "pixel_values": inputs["pixel_values"].to(dtype),
-            "image_text_proprio_mask": image_text_proprio_mask,
-            "action_mask": action_mask,
-            "vlm_position_ids": vlm_position_ids,
-            "proprio_position_ids": proprio_position_ids,
-            "action_position_ids": action_position_ids,
-            "proprios": inputs["proprios"].to(dtype),
-        }
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        start_inference_time = time.time()
-        with torch.inference_mode():  # speeds up
-            actions = model(**inputs)
-        if cnt_step > 0:
-            inference_times.append(time.time() - start_inference_time)
-        env_actions = env_adapter.postprocess(actions[0].float().cpu().numpy())
-
-        # environment step
-        for env_action in env_actions[: cfg.act_steps]:
-            obs, reward, success, truncated, info = env.step(env_action)
-            cnt_step += 1
-            if truncated:
-                break
-
-        # save frame
-        if args.recording:
-            video_writer.append_data(env_adapter.get_video_frame(env, obs))
-
-        # update instruction in long horizon tasks, e.g., pick apple ---> put in top drawer
-        new_instruction = env.unwrapped.get_language_instruction()
-        if new_instruction != instruction:
-            instruction = new_instruction
-
-        # original octo eval only done when timeout, i.e., not upon success
-        if truncated:
-            if args.recording:
-                video_writer.close()
-            break
+        successes.append(success)
+        all_steps.append(steps)
+        all_inference_times.extend(inference_times)
 
     # summary
-    print("\n\n============ Summary ============")
+    num_success = sum(successes)
+    success_rate = num_success / args.num_episodes * 100
+
+    print("\n\n" + "=" * 50)
+    print("EVALUATION SUMMARY")
+    print("=" * 50)
     print(f"Checkpoint: {args.checkpoint_path}")
-    print(f"Action chunk steps (predicted): {cfg.horizon_steps}")
-    print(f"Action chunk steps (executed): {cfg.act_steps}")
-    print(f"Avg inference time (excluding first step): {np.mean(inference_times):.3f}s")
-    print(
-        f"Peak VRAM usage: {torch.cuda.max_memory_reserved(args.gpu_id) / 1024 ** 3:.2f} GB"
-    )
     print(f"Task: {args.task}")
-    print(f"Total environment steps: {cnt_step}")
-    print(f"Success: {success}")
-    if args.recording:
-        print(f"Video saved as try_{args.task}_{episode_id}.mp4")
-    print("======================================\n\n")
+    print(f"CGVD: {'enabled' if args.use_cgvd else 'disabled'}")
+    if args.use_cgvd:
+        print(f"  blur_sigma={args.cgvd_blur_sigma}")
+    print("-" * 50)
+    print(f"Episodes: {args.num_episodes}")
+    print(f"Successes: {num_success}")
+    print(f"SUCCESS RATE: {success_rate:.1f}%")
+    print("-" * 50)
+    print(f"Results: {['S' if s else 'F' for s in successes]}")
+    print(f"Avg steps per episode: {np.mean(all_steps):.1f}")
+    if all_inference_times:
+        print(f"Avg inference time: {np.mean(all_inference_times):.3f}s")
+    print(f"Peak VRAM: {torch.cuda.max_memory_reserved(args.gpu_id) / 1024 ** 3:.2f} GB")
+    print("=" * 50 + "\n")
 
 
 if __name__ == "__main__":
@@ -179,9 +252,64 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_path", type=str)
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--num_episodes", type=int, default=1, help="Number of episodes to run")
     parser.add_argument("--use_bf16", action="store_true")
     parser.add_argument("--use_torch_compile", action="store_true")
     parser.add_argument("--recording", action="store_true")
+    parser.add_argument("--output_dir", type=str, default=".", help="Directory to save output videos")
+    parser.add_argument(
+        "--distractors",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Distractor object IDs to add (e.g., apple orange sponge)"
+    )
+
+    # CGVD arguments
+    parser.add_argument(
+        "--use_cgvd",
+        action="store_true",
+        help="Enable Concept-Gated Visual Distillation",
+    )
+    parser.add_argument(
+        "--cgvd_blur_sigma",
+        type=float,
+        default=15.0,
+        help="Gaussian blur sigma for CGVD background (default: 15.0)",
+    )
+    parser.add_argument(
+        "--cgvd_update_freq",
+        type=int,
+        default=10,
+        help="Frames between CGVD mask updates (default: 10 = 1Hz at 10fps)",
+    )
+    parser.add_argument(
+        "--cgvd_presence_threshold",
+        type=float,
+        default=0.4,
+        help="SAM3 confidence threshold for CGVD (default: 0.4)",
+    )
+    parser.add_argument(
+        "--cgvd_use_mock",
+        action="store_true",
+        help="Use mock segmenter for CGVD testing (no SAM3 required)",
+    )
+    parser.add_argument(
+        "--cgvd_feather_edges",
+        action="store_true",
+        help="Apply edge feathering to CGVD mask transitions",
+    )
+    parser.add_argument(
+        "--cgvd_verbose",
+        action="store_true",
+        help="Print CGVD debug information",
+    )
+    parser.add_argument(
+        "--cgvd_save_debug",
+        action="store_true",
+        help="Save debug images showing original/mask/distilled (to cgvd_debug/)",
+    )
+
     args = parser.parse_args()
 
     # check task
