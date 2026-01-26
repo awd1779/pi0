@@ -25,6 +25,13 @@ def wrap_env_with_cgvd(env, args):
     print(f"[CGVD]   update_freq={args.cgvd_update_freq}")
     print(f"[CGVD]   presence_threshold={args.cgvd_presence_threshold}")
     print(f"[CGVD]   use_mock_segmenter={args.cgvd_use_mock}")
+    if args.cgvd_distractor_names:
+        print(f"[CGVD]   distractor_names={args.cgvd_distractor_names} (distractor-only mode)")
+    else:
+        print(f"[CGVD]   mode=foreground (blur background)")
+
+    # Use task-specific debug directory
+    debug_dir = os.path.join("cgvd_debug", args.task)
 
     return CGVDWrapper(
         env,
@@ -36,6 +43,8 @@ def wrap_env_with_cgvd(env, args):
         include_robot=True,  # Always include robot arm
         verbose=args.cgvd_verbose,
         save_debug_images=args.cgvd_save_debug,
+        debug_dir=debug_dir,
+        distractor_names=args.cgvd_distractor_names,
     )
 
 
@@ -63,6 +72,7 @@ def run_episode(args, env, env_adapter, model, cfg, device, dtype, episode_idx):
     instruction = env.unwrapped.get_language_instruction()
 
     video_writer = None
+    video_path = None
     if args.recording:
         os.environ["TOKENIZERS_PARALLELISM"] = (
             "false"  # avoid tokenizer forking warning about deadlock
@@ -128,6 +138,12 @@ def run_episode(args, env, env_adapter, model, cfg, device, dtype, episode_idx):
         if truncated:
             if video_writer is not None:
                 video_writer.close()
+                # Rename video to include success/failure status
+                if video_path:
+                    result_suffix = "SUCCESS" if success else "FAILED"
+                    new_video_path = video_path.replace(".mp4", f"_{result_suffix}.mp4")
+                    os.rename(video_path, new_video_path)
+                    print(f"Saved: {new_video_path}")
             break
 
     result_str = "SUCCESS" if success else "FAILED"
@@ -180,8 +196,17 @@ def main(args):
     # Add distractors if specified
     if args.distractors:
         from src.cgvd.distractor_wrapper import DistractorWrapper
-        env = DistractorWrapper(env, args.distractors)
-        print(f"[Distractors] Added: {args.distractors}")
+        env = DistractorWrapper(
+            env, args.distractors,
+            distractor_scale=args.distractor_scale,
+            external_asset_scale=args.external_asset_scale
+        )
+        if args.distractor_scale:
+            scale_info = f"all={args.distractor_scale}"
+        else:
+            ext_scale = args.external_asset_scale if args.external_asset_scale else 0.1
+            scale_info = f"rc_*/ycb_*={ext_scale}, others=1.0"
+        print(f"[Distractors] Added: {args.distractors} ({scale_info})")
 
     # optionally wrap with CGVD (after distractors so it sees the cluttered scene)
     env = wrap_env_with_cgvd(env, args)
@@ -264,6 +289,18 @@ if __name__ == "__main__":
         default=[],
         help="Distractor object IDs to add (e.g., apple orange sponge)"
     )
+    parser.add_argument(
+        "--distractor_scale",
+        type=float,
+        default=None,
+        help="Scale multiplier for ALL distractor objects (overrides everything)"
+    )
+    parser.add_argument(
+        "--external_asset_scale",
+        type=float,
+        default=None,
+        help="Scale multiplier for rc_* and ycb_* objects only (default: 0.1 = 10%%). Built-in objects unaffected."
+    )
 
     # CGVD arguments
     parser.add_argument(
@@ -308,6 +345,14 @@ if __name__ == "__main__":
         "--cgvd_save_debug",
         action="store_true",
         help="Save debug images showing original/mask/distilled (to cgvd_debug/)",
+    )
+    parser.add_argument(
+        "--cgvd_distractor_names",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Object names to blur as distractors (e.g., fork knife spatula). "
+             "When specified, only these objects are blurred, keeping table/target sharp.",
     )
 
     args = parser.parse_args()
