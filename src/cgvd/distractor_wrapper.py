@@ -140,15 +140,31 @@ class DistractorWrapper:
 
         Args:
             env: The SimplerEnv environment to wrap
-            distractor_ids: List of distractor object IDs to add
+            distractor_ids: List of distractor object IDs to add. Supports per-object scales
+                            using format "object_id:scale" (e.g., "rc_fork_11:0.5").
             distractor_scale: Optional scale multiplier for ALL distractors (0.0-1.0).
                             If set, overrides all other scale settings.
             external_asset_scale: Optional scale multiplier for rc_* and ycb_* objects only.
                             If None, uses DEFAULT_EXTERNAL_ASSET_SCALE (0.1).
                             Built-in objects (green_cube, eggplant, etc.) are unaffected.
+                            Utensils (fork, knife, spoon, etc.) default to 1.0.
         """
         self.env = env
-        self.distractor_ids = distractor_ids
+        # Parse distractor_ids for per-object scales (format: "object_id:scale")
+        self.distractor_ids = []
+        self.per_object_scales = {}  # object_id -> scale
+        for item in distractor_ids:
+            if ":" in item:
+                obj_id, scale_str = item.rsplit(":", 1)
+                try:
+                    self.per_object_scales[obj_id] = float(scale_str)
+                    self.distractor_ids.append(obj_id)
+                except ValueError:
+                    # Not a valid scale, treat whole thing as object ID
+                    self.distractor_ids.append(item)
+            else:
+                self.distractor_ids.append(item)
+
         self.distractor_scale = distractor_scale
         self.external_asset_scale = external_asset_scale if external_asset_scale is not None else self.DEFAULT_EXTERNAL_ASSET_SCALE
         self.distractor_objs = []
@@ -172,18 +188,34 @@ class DistractorWrapper:
 
             density = model_db[model_id].get("density", 1000)
 
-            # Determine scale: use explicit distractor_scale, or model_db scale, or default
-            if self.distractor_scale is not None:
+            # Check if this is a utensil (which shouldn't be scaled down by default)
+            is_utensil = any(u in model_id.lower() for u in ["fork", "knife", "spoon", "spatula", "ladle", "whisk"])
+
+            # Determine scale with priority:
+            # 1. Per-object scale (e.g., "rc_fork_11:0.5")
+            # 2. Global distractor_scale (applies to all)
+            # 3. Default logic (utensils=1.0, external=0.1, built-in=1.0)
+            scale_source = "default"
+            if model_id in self.per_object_scales:
+                scale = self.per_object_scales[model_id]
+                scale_source = "per-object"
+            elif self.distractor_scale is not None:
                 scale = self.distractor_scale
+                scale_source = "global"
             else:
                 # Use scale from model_db if available
                 model_scales = model_db[model_id].get("scales", [1.0])
                 scale = model_scales[0] if model_scales else 1.0
 
                 # Apply scale reduction for external dataset objects (they tend to be oversized)
+                # EXCEPT utensils which are already correctly sized
                 # Built-in objects (green_cube, eggplant, bridge_*, etc.) keep their original scale
-                if model_id.startswith("rc_") or model_id.startswith("ycb_"):
+                is_external = model_id.startswith("rc_") or model_id.startswith("ycb_")
+                if is_external and not is_utensil:
                     scale *= self.external_asset_scale
+                    scale_source = "external"
+                elif is_utensil:
+                    scale_source = "utensil"
 
             obj = base_env._build_actor_helper(
                 model_id, scene,
@@ -194,7 +226,7 @@ class DistractorWrapper:
             )
             obj.name = f"distractor_{model_id}"
             self.distractor_objs.append(obj)
-            print(f"[Distractor] Loaded: {model_id} (scale={scale:.2f})")
+            print(f"[Distractor] Loaded: {model_id} (scale={scale:.3f}, {scale_source})")
 
         self._distractors_loaded = True
         print(f"[Distractor] Successfully loaded {len(self.distractor_objs)} distractor(s)")
@@ -218,21 +250,22 @@ class DistractorWrapper:
                     safety_bubbles.append((pos[0], pos[1], SAFETY_BUBBLE_RADIUS))
                     print(f"[Distractor] Safety bubble around {attr}: center=({pos[0]:.3f}, {pos[1]:.3f}), radius={SAFETY_BUBBLE_RADIUS}m")
 
-        # Table bounds - AVOID ROBOT WORKSPACE
-        # Robot base is at x≈0, gripper extends to x≈-0.10
-        # Safe table area is x < -0.12 (away from robot)
-        # Table extends back to about x = -0.30
-        TABLE_X_MIN, TABLE_X_MAX = -0.28, -0.12  # Keep away from robot (x > -0.12)
-        TABLE_Y_MIN, TABLE_Y_MAX = -0.14, 0.14
+        # Table bounds - based on Bridge task object placement
+        # Task objects are at xy_center=[-0.16, 0.00] with ±0.075 range
+        # So task area is roughly x: -0.235 to -0.085, y: -0.075 to 0.075
+        # IMPORTANT: Table collision geometry is limited - stay well within bounds
+        TABLE_X_MIN, TABLE_X_MAX = -0.22, -0.10  # Stay within known table surface
+        TABLE_Y_MIN, TABLE_Y_MAX = -0.10, 0.10   # Conservative Y bounds
 
-        # 6 safe positions away from robot workspace
+        # Safe positions for distractors (corners and edges of safe area)
+        # These should all be on the physical table surface
         edge_positions = [
-            (-0.26, -0.12),   # Back-left
-            (-0.26, 0.00),    # Back-center
-            (-0.26, 0.12),    # Back-right
-            (-0.20, -0.12),   # Mid-left
-            (-0.20, 0.12),    # Mid-right
-            (-0.14, 0.00),    # Front-center (but still away from robot)
+            (-0.20, -0.08),   # Back-left (near task area but outside)
+            (-0.20, 0.08),    # Back-right
+            (-0.12, -0.08),   # Front-left
+            (-0.12, 0.08),    # Front-right
+            (-0.16, -0.09),   # Center-left (beside task area)
+            (-0.16, 0.09),    # Center-right
         ]
 
         # Track placed distractor positions to avoid stacking
@@ -286,7 +319,8 @@ class DistractorWrapper:
             # Record this position
             placed_positions.append((x, y))
 
-            z = table_height + 0.5
+            # Spawn slightly above table (0.1m) to avoid excessive bouncing
+            z = table_height + 0.10
             obj.set_pose(sapien.Pose([x, y, z], [1, 0, 0, 0]))
             print(f"[Distractor] Positioned {obj.name} at ({x:.3f}, {y:.3f}, {z:.3f})")
 
@@ -328,55 +362,172 @@ class DistractorWrapper:
 
         return count
 
-    def _remove_bubble_violators(self, safety_bubbles):
-        """Remove distractors that ended up inside safety bubbles after physics."""
+    def _relocate_bubble_violators(self, safety_bubbles, rng):
+        """Relocate distractors that ended up inside safety bubbles after physics.
+
+        Instead of removing objects, tries to find a new valid position and respawn them.
+        Only removes if no valid position can be found after max attempts.
+        """
         base_env = self.env.unwrapped
+        table_height = 0.87
+
+        # Table bounds (same as _position_distractors)
+        TABLE_X_MIN, TABLE_X_MAX = -0.22, -0.10
+        TABLE_Y_MIN, TABLE_Y_MAX = -0.10, 0.10
+
+        relocated = []
         removed = []
+
+        # Get current positions of all distractors for spacing check
+        def get_other_positions(exclude_obj):
+            return [(o.pose.p[0], o.pose.p[1]) for o in self.distractor_objs if o != exclude_obj]
+
         for obj in self.distractor_objs[:]:  # Copy list to allow removal
             pos = obj.pose.p
+            in_bubble = False
+
             for bx, by, radius in safety_bubbles:
                 dist = np.sqrt((pos[0] - bx)**2 + (pos[1] - by)**2)
                 if dist < radius:
-                    print(f"[Distractor] REMOVING {obj.name} - inside safety bubble (dist={dist:.3f} < {radius})")
-                    base_env._scene.remove_actor(obj)
-                    self.distractor_objs.remove(obj)
-                    removed.append(obj.name)
+                    in_bubble = True
+                    print(f"[Distractor] {obj.name} inside safety bubble (dist={dist:.3f} < {radius}), relocating...")
                     break
-        return removed
 
-    def _remove_touching_distractors(self, min_dist=0.05):
-        """Remove distractors that are too close to each other after physics settling.
+            if not in_bubble:
+                continue
 
-        When two objects are too close, removes the one that was added later (higher index).
+            # Try to find a new valid position
+            max_attempts = 30
+            found_position = False
+
+            for attempt in range(max_attempts):
+                # Random position in valid table area
+                new_x = rng.uniform(TABLE_X_MIN, TABLE_X_MAX)
+                new_y = rng.uniform(TABLE_Y_MIN, TABLE_Y_MAX)
+
+                # Check against safety bubbles
+                valid = True
+                for bx, by, radius in safety_bubbles:
+                    dist = np.sqrt((new_x - bx)**2 + (new_y - by)**2)
+                    if dist < radius:
+                        valid = False
+                        break
+
+                # Check against other distractors (8cm minimum spacing)
+                if valid:
+                    for px, py in get_other_positions(obj):
+                        dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                        if dist < 0.08:
+                            valid = False
+                            break
+
+                if valid:
+                    # Found valid position - relocate object
+                    new_z = table_height + 0.02  # Slightly above table
+                    obj.set_pose(sapien.Pose([new_x, new_y, new_z], [1, 0, 0, 0]))
+                    obj.set_velocity(np.zeros(3))
+                    obj.set_angular_velocity(np.zeros(3))
+                    print(f"[Distractor] RELOCATED {obj.name} to ({new_x:.3f}, {new_y:.3f}, {new_z:.3f})")
+                    relocated.append(obj.name)
+                    found_position = True
+                    break
+
+            if not found_position:
+                # No valid position found - remove as last resort
+                print(f"[Distractor] REMOVING {obj.name} - no valid position found after {max_attempts} attempts")
+                base_env._scene.remove_actor(obj)
+                self.distractor_objs.remove(obj)
+                removed.append(obj.name)
+
+        return relocated, removed
+
+    def _relocate_touching_distractors(self, safety_bubbles, rng, min_dist=0.05):
+        """Relocate distractors that are too close to each other after physics settling.
+
+        When two objects are too close, relocates the one that was added later (higher index).
+        Only removes if no valid position can be found.
         """
         base_env = self.env.unwrapped
+        table_height = 0.87
+
+        # Table bounds (same as _position_distractors)
+        TABLE_X_MIN, TABLE_X_MAX = -0.22, -0.10
+        TABLE_Y_MIN, TABLE_Y_MAX = -0.10, 0.10
+
+        relocated = []
         removed = []
 
         # Build list of (obj, position) for remaining distractors
         obj_positions = [(obj, obj.pose.p) for obj in self.distractor_objs]
 
-        # Check each pair
-        to_remove = set()
+        # Find objects that need relocation
+        to_relocate = []
         for i, (obj_i, pos_i) in enumerate(obj_positions):
-            if obj_i.name in to_remove:
-                continue
             for j, (obj_j, pos_j) in enumerate(obj_positions[i+1:], start=i+1):
-                if obj_j.name in to_remove:
-                    continue
                 dist = np.sqrt((pos_i[0] - pos_j[0])**2 + (pos_i[1] - pos_j[1])**2)
                 if dist < min_dist:
-                    # Remove the later object (higher index)
-                    print(f"[Distractor] REMOVING {obj_j.name} - too close to {obj_i.name} (dist={dist:.3f} < {min_dist})")
-                    to_remove.add(obj_j.name)
+                    # Relocate the later object (higher index)
+                    if obj_j not in to_relocate:
+                        print(f"[Distractor] {obj_j.name} too close to {obj_i.name} (dist={dist:.3f} < {min_dist}), relocating...")
+                        to_relocate.append(obj_j)
 
-        # Actually remove the objects
-        for obj in self.distractor_objs[:]:
-            if obj.name in to_remove:
+        # Get positions of objects that DON'T need relocation
+        def get_stable_positions():
+            return [(o.pose.p[0], o.pose.p[1]) for o in self.distractor_objs if o not in to_relocate]
+
+        # Try to relocate each object
+        for obj in to_relocate:
+            max_attempts = 30
+            found_position = False
+
+            for attempt in range(max_attempts):
+                new_x = rng.uniform(TABLE_X_MIN, TABLE_X_MAX)
+                new_y = rng.uniform(TABLE_Y_MIN, TABLE_Y_MAX)
+
+                # Check against safety bubbles
+                valid = True
+                for bx, by, radius in safety_bubbles:
+                    dist = np.sqrt((new_x - bx)**2 + (new_y - by)**2)
+                    if dist < radius:
+                        valid = False
+                        break
+
+                # Check against stable objects and already-relocated objects
+                if valid:
+                    for px, py in get_stable_positions():
+                        dist = np.sqrt((new_x - px)**2 + (new_y - py)**2)
+                        if dist < 0.08:
+                            valid = False
+                            break
+
+                # Also check against already relocated objects
+                if valid:
+                    for rel_name in relocated:
+                        rel_obj = next((o for o in self.distractor_objs if o.name == rel_name), None)
+                        if rel_obj:
+                            rel_pos = rel_obj.pose.p
+                            dist = np.sqrt((new_x - rel_pos[0])**2 + (new_y - rel_pos[1])**2)
+                            if dist < 0.08:
+                                valid = False
+                                break
+
+                if valid:
+                    new_z = table_height + 0.02
+                    obj.set_pose(sapien.Pose([new_x, new_y, new_z], [1, 0, 0, 0]))
+                    obj.set_velocity(np.zeros(3))
+                    obj.set_angular_velocity(np.zeros(3))
+                    print(f"[Distractor] RELOCATED {obj.name} to ({new_x:.3f}, {new_y:.3f}, {new_z:.3f})")
+                    relocated.append(obj.name)
+                    found_position = True
+                    break
+
+            if not found_position:
+                print(f"[Distractor] REMOVING {obj.name} - no valid position found after {max_attempts} attempts")
                 base_env._scene.remove_actor(obj)
                 self.distractor_objs.remove(obj)
                 removed.append(obj.name)
 
-        return removed
+        return relocated, removed
 
     def reset(self, **kwargs):
         # Remove old distractor actors from scene (scene persists across resets)
@@ -434,15 +585,25 @@ class DistractorWrapper:
             for _ in range(int(sim_freq * 1.0)):  # extra 1.0s
                 base_env._scene.step()
 
-        # Remove distractors that drifted into safety bubbles during physics
-        removed = self._remove_bubble_violators(safety_bubbles)
+        # Relocate distractors that drifted into safety bubbles during physics
+        relocated, removed = self._relocate_bubble_violators(safety_bubbles, rng)
+        if relocated:
+            print(f"[Distractor] Relocated {len(relocated)} objects that were in safety bubbles: {relocated}")
         if removed:
-            print(f"[Distractor] Removed {len(removed)} objects that violated safety bubbles: {removed}")
+            print(f"[Distractor] Removed {len(removed)} objects (no valid position found): {removed}")
 
-        # Remove distractors that ended up too close to each other after settling
-        removed_touching = self._remove_touching_distractors(min_dist=0.05)
+        # Relocate distractors that ended up too close to each other after settling
+        relocated_touching, removed_touching = self._relocate_touching_distractors(safety_bubbles, rng, min_dist=0.05)
+        if relocated_touching:
+            print(f"[Distractor] Relocated {len(relocated_touching)} objects that were touching: {relocated_touching}")
         if removed_touching:
-            print(f"[Distractor] Removed {len(removed_touching)} objects that were touching: {removed_touching}")
+            print(f"[Distractor] Removed {len(removed_touching)} touching objects (no valid position): {removed_touching}")
+
+        # Quick physics settle after any relocations (0.3s)
+        if relocated or relocated_touching:
+            print(f"[Distractor] Settling relocated objects...")
+            for _ in range(int(sim_freq * 0.3)):
+                base_env._scene.step()
 
         # Log how many distractors are visible after settling
         visible_count = self._count_visible_distractors(initial_positions)

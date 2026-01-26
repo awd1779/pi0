@@ -24,10 +24,10 @@ cd /home/ubuntu/open-pi-zero
 # Shared configuration
 TASK="widowx_spoon_on_towel"
 CHECKPOINT="/home/ubuntu/open-pi-zero/checkpoints/bridge_beta.pt"
-# Distractor object IDs (for spawning in simulation)
-DISTRACTORS="rc_fork_11 rc_knife_26 rc_spatula_1"
-# Distractor names for SAM segmentation (used by CGVD to blur only these objects)
-DISTRACTOR_NAMES="fork knife spatula"
+# Distractor object IDs with optional per-object scales (format: object_id:scale)
+# Names are auto-derived: rc_fork_11 -> "fork", rc_knife_26 -> "knife", etc.
+# Utensils default to scale=1.0, use :0.5 etc to adjust size
+DISTRACTORS="ycb_032_knife:0.3 ycb_030_fork:0.3 rc_fork_11:0.1 rc_knife_26:0.1"
 
 # Create log directory
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -50,7 +50,7 @@ echo "Episodes per run: $NUM_EPISODES"
 echo "Number of runs: $NUM_RUNS"
 echo "Seeds: $SEEDS"
 echo "Distractors: $DISTRACTORS"
-echo "Distractor names (for CGVD): $DISTRACTOR_NAMES"
+echo "CGVD mode: Safe-set protection (auto-derived names)"
 echo "Log dir: $LOG_DIR"
 echo "=============================================="
 
@@ -59,7 +59,7 @@ cat > "${LOG_DIR}/config.txt" << EOF
 TASK=$TASK
 CHECKPOINT=$CHECKPOINT
 DISTRACTORS=$DISTRACTORS
-DISTRACTOR_NAMES=$DISTRACTOR_NAMES
+CGVD_MODE=safe-set-protection (distractor names auto-derived)
 NUM_EPISODES=$NUM_EPISODES
 NUM_RUNS=$NUM_RUNS
 START_SEED=$START_SEED
@@ -146,7 +146,7 @@ for ((run=0; run<NUM_RUNS; run++)); do
         --cgvd_blur_sigma 15.0 \
         --cgvd_update_freq 1 \
         --cgvd_presence_threshold 0.5 \
-        --cgvd_distractor_names $DISTRACTOR_NAMES \
+        --cgvd_verbose \
         --cgvd_save_debug \
         2>&1 | tee "${RUN_DIR}/cgvd.log"
 
@@ -253,8 +253,9 @@ done
 cat >> "$REPORT_FILE" << EOF
 
 ### CGVD Parameters
-- Mode: **Distractor-only blurring** (blur only distractors, keep table/target sharp)
-- Distractor names: \`$DISTRACTOR_NAMES\`
+- Mode: **Safe-set protection** (distractor names auto-derived from asset IDs)
+- Algorithm: \`final_mask = distractor_mask AND (NOT safe_mask)\`
+- Safe set: target + anchor + robot (parsed from instruction)
 - Blur sigma: 15.0
 - Update frequency: 1
 - Presence threshold: 0.5

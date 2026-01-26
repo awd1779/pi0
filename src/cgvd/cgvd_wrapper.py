@@ -91,8 +91,12 @@ class CGVDWrapper(gym.Wrapper):
         self.parser = InstructionParser()
         self.abstraction = SpectralAbstraction(sigma=blur_sigma)
 
-        # State
+        # State - masks
         self.cached_mask: Optional[np.ndarray] = None
+        self.cached_distractor_mask: Optional[np.ndarray] = None  # Raw distractor mask before subtraction
+        self.cached_safe_mask: Optional[np.ndarray] = None  # Safe set mask (target + anchor + robot)
+
+        # State - frame tracking
         self.frame_count: int = 0
         self.current_instruction: Optional[str] = None
         self.current_target: Optional[str] = None
@@ -117,6 +121,8 @@ class CGVDWrapper(gym.Wrapper):
 
         # Clear cached state
         self.cached_mask = None
+        self.cached_distractor_mask = None
+        self.cached_safe_mask = None
         self.frame_count = 0
         self.current_instruction = None
         self.current_target = None
@@ -200,22 +206,54 @@ class CGVDWrapper(gym.Wrapper):
         image, camera_name = self._get_image_and_camera(obs)
 
         if self.distractor_names:
-            # DISTRACTOR MODE: Segment and blur only specified distractor objects
-            # Build concept prompt from distractor names
-            concepts = ". ".join(self.distractor_names)
+            # DISTRACTOR MODE with Safe-Set Protection
+            # This mode segments distractors, then SUBTRACTS the safe set (target + anchor + robot)
+            # to guarantee the target object is NEVER blurred, even if SAM3 confuses it with a distractor
+
+            # Step 1: Get target/anchor from instruction (needed for safe set)
+            instruction = self.env.unwrapped.get_language_instruction()
+            if instruction != self.current_instruction:
+                self.current_instruction = instruction
+                self.current_target, self.current_anchor = self.parser.parse(instruction)
+                if self.verbose:
+                    print(
+                        f"[CGVD] Instruction: '{instruction}' -> "
+                        f"target='{self.current_target}', anchor='{self.current_anchor}'"
+                    )
 
             if self.frame_count % self.update_freq == 0 or self.cached_mask is None:
-                self.cached_mask = self.segmenter.segment(image, concepts)
+                # Step 2: Segment distractors
+                distractor_concepts = ". ".join(self.distractor_names)
+                distractor_mask = self.segmenter.segment(image, distractor_concepts)
+
+                # Step 3: Segment safe set (target + anchor + robot)
+                safe_concepts = self.parser.build_concept_prompt(
+                    self.current_target,
+                    self.current_anchor,
+                    include_robot=self.include_robot,
+                )
+                safe_mask = self.segmenter.segment(image, safe_concepts)
+
+                # Step 4: SUBTRACT safe set from distractors
+                # final_mask = distractor AND (NOT safe)
+                # This ensures target is NEVER blurred even if SAM3 confuses it with a distractor
+                self.cached_distractor_mask = distractor_mask  # Store for debug
+                self.cached_safe_mask = safe_mask  # Store for debug
+                self.cached_mask = np.logical_and(
+                    distractor_mask > 0.5, safe_mask < 0.5
+                ).astype(np.float32)
+
                 if self.verbose:
-                    mask_coverage = self.cached_mask.sum() / self.cached_mask.size * 100
+                    d_cov = distractor_mask.sum() / distractor_mask.size * 100
+                    s_cov = safe_mask.sum() / safe_mask.size * 100
+                    f_cov = self.cached_mask.sum() / self.cached_mask.size * 100
                     print(
-                        f"[CGVD] Frame {self.frame_count}: Distractor mask ({concepts}), "
-                        f"coverage={mask_coverage:.1f}%"
+                        f"[CGVD] Distractor: {d_cov:.1f}%, Safe: {s_cov:.1f}%, Final: {f_cov:.1f}%"
                     )
 
             self.frame_count += 1
 
-            # Apply blur to ONLY distractor regions (mask=1 means blur)
+            # Blur only the final distractor regions (after safe-set subtraction)
             distilled = self.abstraction.apply_to_masked_regions(image, self.cached_mask)
 
         else:
@@ -274,44 +312,115 @@ class CGVDWrapper(gym.Wrapper):
     def _save_debug_images(
         self, original: np.ndarray, mask: np.ndarray, distilled: np.ndarray
     ):
-        """Save debug images showing original, mask, and distilled output."""
+        """Save debug images showing original, masks, and distilled output.
+
+        In distractor mode with safe-set protection, shows 5 columns:
+        - Original | Distractors | Safe Set | Final (D-S) | Distilled
+
+        In legacy mode, shows 3 columns:
+        - Original | Foreground | Distilled
+        """
         frame_num = self.frame_count - 1  # Already incremented
-
-        # Create side-by-side comparison
         h, w = original.shape[:2]
-
-        # Convert mask to visualization (grayscale -> RGB)
-        mask_vis = (mask * 255).astype(np.uint8)
-        mask_vis = cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2RGB)
-
-        # Stack horizontally: original | mask | distilled
-        comparison = np.hstack([original, mask_vis, distilled])
-
-        # Add labels
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(comparison, "Original", (10, 30), font, 0.7, (255, 255, 255), 2)
-        # Show mask label based on mode
-        if self.distractor_names:
-            mask_label = f"Distractors: {', '.join(self.distractor_names[:3])}"
-            if len(self.distractor_names) > 3:
-                mask_label += "..."
-            mask_label += " (white=blur)"
+
+        if self.distractor_names and self.cached_distractor_mask is not None:
+            # 5-column layout for distractor mode with safe-set protection
+            dist_vis = (self.cached_distractor_mask * 255).astype(np.uint8)
+            dist_vis = cv2.cvtColor(dist_vis, cv2.COLOR_GRAY2RGB)
+
+            safe_vis = (self.cached_safe_mask * 255).astype(np.uint8)
+            safe_vis = cv2.cvtColor(safe_vis, cv2.COLOR_GRAY2RGB)
+
+            final_vis = (mask * 255).astype(np.uint8)
+            final_vis = cv2.cvtColor(final_vis, cv2.COLOR_GRAY2RGB)
+
+            comparison = np.hstack([original, dist_vis, safe_vis, final_vis, distilled])
+
+            # Labels with color coding
+            cv2.putText(comparison, "Original", (10, 30), font, 0.5, (255, 255, 255), 1)
+            cv2.putText(
+                comparison, "Distractors", (w + 10, 30), font, 0.5, (255, 255, 255), 1
+            )
+            cv2.putText(
+                comparison, "Safe Set", (2 * w + 10, 30), font, 0.5, (0, 255, 0), 1
+            )
+            cv2.putText(
+                comparison, "Final (D-S)", (3 * w + 10, 30), font, 0.5, (255, 255, 0), 1
+            )
+            cv2.putText(
+                comparison, "Distilled", (4 * w + 10, 30), font, 0.5, (255, 255, 255), 1
+            )
+
+            # Add coverage percentages
+            d_cov = self.cached_distractor_mask.sum() / self.cached_distractor_mask.size * 100
+            s_cov = self.cached_safe_mask.sum() / self.cached_safe_mask.size * 100
+            f_cov = mask.sum() / mask.size * 100
+            cv2.putText(
+                comparison, f"{d_cov:.1f}%", (w + 10, 50), font, 0.4, (200, 200, 200), 1
+            )
+            cv2.putText(
+                comparison, f"{s_cov:.1f}%", (2 * w + 10, 50), font, 0.4, (0, 200, 0), 1
+            )
+            cv2.putText(
+                comparison, f"{f_cov:.1f}%", (3 * w + 10, 50), font, 0.4, (200, 200, 0), 1
+            )
+
+            # Add target/anchor info
+            if self.current_target:
+                cv2.putText(
+                    comparison,
+                    f"Target: {self.current_target}",
+                    (2 * w + 10, h - 25),
+                    font,
+                    0.4,
+                    (0, 255, 0),
+                    1,
+                )
+            if self.current_anchor:
+                cv2.putText(
+                    comparison,
+                    f"Anchor: {self.current_anchor}",
+                    (2 * w + 10, h - 10),
+                    font,
+                    0.4,
+                    (0, 200, 0),
+                    1,
+                )
+
         else:
-            mask_label = "Foreground (white=keep)"
-        cv2.putText(comparison, mask_label, (w + 10, 30), font, 0.5, (255, 255, 255), 2)
-        cv2.putText(comparison, "Distilled (VLA input)", (2 * w + 10, 30), font, 0.7, (255, 255, 255), 2)
+            # Original 3-column layout for legacy mode
+            mask_vis = (mask * 255).astype(np.uint8)
+            mask_vis = cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2RGB)
 
-        # Add confidence scores if available
-        if hasattr(self.segmenter, 'last_scores') and self.segmenter.last_scores:
-            y_offset = 55
-            for concept, score in self.segmenter.last_scores.items():
-                # Color code: green if detected (>threshold), red if not
-                color = (0, 255, 0) if score >= self.presence_threshold else (255, 100, 100)
-                score_text = f"{concept}: {score:.2f}"
-                cv2.putText(comparison, score_text, (w + 10, y_offset), font, 0.4, color, 1)
-                y_offset += 18
+            comparison = np.hstack([original, mask_vis, distilled])
 
-        # Add instruction text
+            # Add labels
+            cv2.putText(comparison, "Original", (10, 30), font, 0.7, (255, 255, 255), 2)
+            cv2.putText(
+                comparison, "Foreground (white=keep)", (w + 10, 30), font, 0.5, (255, 255, 255), 2
+            )
+            cv2.putText(
+                comparison, "Distilled (VLA input)", (2 * w + 10, 30), font, 0.7, (255, 255, 255), 2
+            )
+
+            # Add confidence scores if available
+            if hasattr(self.segmenter, "last_scores") and self.segmenter.last_scores:
+                y_offset = 55
+                for concept, score in self.segmenter.last_scores.items():
+                    # Color code: green if detected (>threshold), red if not
+                    color = (
+                        (0, 255, 0)
+                        if score >= self.presence_threshold
+                        else (255, 100, 100)
+                    )
+                    score_text = f"{concept}: {score:.2f}"
+                    cv2.putText(
+                        comparison, score_text, (w + 10, y_offset), font, 0.4, color, 1
+                    )
+                    y_offset += 18
+
+        # Add instruction text (common to both modes)
         if self.current_instruction:
             cv2.putText(
                 comparison,
@@ -326,7 +435,8 @@ class CGVDWrapper(gym.Wrapper):
         # Save as BGR for OpenCV
         comparison_bgr = cv2.cvtColor(comparison, cv2.COLOR_RGB2BGR)
         cv2.imwrite(
-            os.path.join(self.episode_debug_dir, f"frame_{frame_num:04d}.png"), comparison_bgr
+            os.path.join(self.episode_debug_dir, f"frame_{frame_num:04d}.png"),
+            comparison_bgr,
         )
 
     def _write_image_to_obs(

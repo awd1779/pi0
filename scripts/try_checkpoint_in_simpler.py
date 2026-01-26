@@ -352,10 +352,33 @@ if __name__ == "__main__":
         nargs="*",
         default=[],
         help="Object names to blur as distractors (e.g., fork knife spatula). "
-             "When specified, only these objects are blurred, keeping table/target sharp.",
+             "Auto-derived from --distractors if not specified. "
+             "Override to use different names for SAM3 segmentation.",
     )
 
     args = parser.parse_args()
+
+    # Auto-derive cgvd_distractor_names from distractors if not explicitly provided
+    if args.distractors and args.use_cgvd and not args.cgvd_distractor_names:
+        # Extract object names from asset IDs like "rc_fork_11" -> "fork"
+        # Pattern: prefix_name_number (prefix=rc/ycb, name=object, number=variant)
+        derived_names = []
+        for asset_id in args.distractors:
+            parts = asset_id.split("_")
+            if len(parts) >= 3:
+                # Remove prefix (rc/ycb) and suffix (number), join middle parts
+                # e.g., "rc_fork_11" -> "fork", "rc_measuring_spoon_17" -> "measuring spoon"
+                name = " ".join(parts[1:-1])
+                if name and name not in derived_names:
+                    derived_names.append(name)
+            elif len(parts) == 2:
+                # e.g., "apple_1" -> "apple"
+                name = parts[0]
+                if name and name not in derived_names:
+                    derived_names.append(name)
+        if derived_names:
+            args.cgvd_distractor_names = derived_names
+            print(f"[CGVD] Auto-derived distractor names from assets: {derived_names}")
 
     # check task
     if "google_robot" in args.task:
