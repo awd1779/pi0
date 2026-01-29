@@ -3,6 +3,46 @@ import sapien.core as sapien
 from pathlib import Path
 
 
+def get_actor_xy_radius(actor):
+    """Compute XY bounding radius for an actor from its collision shapes.
+
+    Returns the radius of the smallest circle (centered at actor origin)
+    that contains the actor's XY footprint.
+    """
+    max_radius = 0.0
+
+    for shape in actor.get_collision_shapes():
+        geom = shape.geometry
+
+        if isinstance(geom, sapien.BoxGeometry):
+            half = geom.half_lengths
+            # XY diagonal / 2
+            radius = np.sqrt(half[0]**2 + half[1]**2)
+
+        elif isinstance(geom, sapien.SphereGeometry):
+            radius = geom.radius
+
+        elif isinstance(geom, sapien.ConvexMeshGeometry):
+            verts = np.array(geom.vertices) * np.array(geom.scale)
+            # XY extent from vertices
+            xy_min = verts[:, :2].min(axis=0)
+            xy_max = verts[:, :2].max(axis=0)
+            extent = xy_max - xy_min
+            radius = np.sqrt(extent[0]**2 + extent[1]**2) / 2
+
+        elif isinstance(geom, sapien.CapsuleGeometry):
+            # Capsule: radius + half_length in one direction
+            radius = geom.radius + geom.half_length
+
+        else:
+            # Fallback for unknown geometry types
+            radius = 0.05
+
+        max_radius = max(max_radius, radius)
+
+    return max_radius
+
+
 # ============================================================================
 # Available Objects for Clutter Testing
 # ============================================================================
@@ -168,6 +208,7 @@ class DistractorWrapper:
         self.distractor_scale = distractor_scale
         self.external_asset_scale = external_asset_scale if external_asset_scale is not None else self.DEFAULT_EXTERNAL_ASSET_SCALE
         self.distractor_objs = []
+        self.distractor_radii = []  # XY bounding radius for each distractor
         self._distractors_loaded = False
 
     def _load_distractors(self):
@@ -226,134 +267,221 @@ class DistractorWrapper:
             )
             obj.name = f"distractor_{model_id}"
             self.distractor_objs.append(obj)
-            print(f"[Distractor] Loaded: {model_id} (scale={scale:.3f}, {scale_source})")
+
+            # Compute XY bounding radius from collision geometry
+            xy_radius = get_actor_xy_radius(obj)
+            self.distractor_radii.append(xy_radius)
+            print(f"[Distractor] Loaded: {model_id} (scale={scale:.3f}, {scale_source}, radius={xy_radius:.3f}m)")
 
         self._distractors_loaded = True
         print(f"[Distractor] Successfully loaded {len(self.distractor_objs)} distractor(s)")
 
     def _position_distractors(self, rng):
-        """Position distractors randomly on table, avoiding task objects and robot."""
+        """Position distractors on table/sink using grid-based placement.
+
+        Creates a grid over the surface, filters out cells that overlap
+        with task objects, then places each distractor in a random available cell.
+
+        For eggplant task (sink environment), uses sink basin bounds instead of table.
+        """
         base_env = self.env.unwrapped
-        table_height = 0.87  # Bridge table height
 
-        # Safety bubble around task objects - distractors must stay outside this radius
-        SAFETY_BUBBLE_RADIUS = 0.08  # 8cm radius around each task object
+        # Detect if this is the sink task (eggplant in basket)
+        instruction = ""
+        if hasattr(base_env, 'get_language_instruction'):
+            instruction = base_env.get_language_instruction()
+        is_sink_task = "eggplant" in instruction.lower() and "basket" in instruction.lower()
 
-        # Get task object positions to create safety bubbles
+        # Sink basin bounds (for eggplant task) - from collision mesh analysis
+        # Basin interior world coords where objects can rest
+        SINK_X_MIN, SINK_X_MAX = -0.276, -0.045
+        SINK_Y_MIN, SINK_Y_MAX = -0.052, 0.303
+        SINK_Z = 0.88  # Basin floor height
+
+        # Table bounds (for other tasks) - from bridge_table_1_v1 collision mesh
+        # Actual table surface: X: -0.35 to 0.01, Y: -0.30 to 0.30
+        # Robot at X=0.147, keep margin from robot workspace
+        TABLE_X_MIN, TABLE_X_MAX = -0.35, -0.02
+        TABLE_Y_MIN, TABLE_Y_MAX = -0.28, 0.28
+        TABLE_Z = 0.87  # Table height
+
+        # Select bounds based on task
+        if is_sink_task:
+            X_MIN, X_MAX = SINK_X_MIN, SINK_X_MAX
+            Y_MIN, Y_MAX = SINK_Y_MIN, SINK_Y_MAX
+            surface_height = SINK_Z
+            print(f"[Distractor] Detected SINK task: placing distractors in basin")
+        else:
+            X_MIN, X_MAX = TABLE_X_MIN, TABLE_X_MAX
+            Y_MIN, Y_MAX = TABLE_Y_MIN, TABLE_Y_MAX
+            surface_height = TABLE_Z
+            print(f"[Distractor] Detected TABLE task: placing distractors on table")
+
+        # Store surface height for use by other methods
+        self._surface_height = surface_height
+        self._is_sink_task = is_sink_task
+
+        # Safety bubble parameters
+        SAFETY_PADDING = 0.0  # No padding - distractors can touch task object bounding boxes
+        FALLBACK_RADIUS = 0.06  # 6cm fallback if no bounding box available
+
+        # Get task object positions for safety bubbles
         safety_bubbles = []  # List of (x, y, radius)
+        obj_bbox_attrs = {
+            'episode_source_obj': 'episode_source_obj_bbox_world',
+            'episode_target_obj': 'episode_target_obj_bbox_world',
+        }
 
-        for attr in ['episode_target_obj', 'episode_source_obj']:
-            if hasattr(base_env, attr):
-                obj = getattr(base_env, attr)
+        for obj_attr, bbox_attr in obj_bbox_attrs.items():
+            if hasattr(base_env, obj_attr):
+                obj = getattr(base_env, obj_attr)
                 if obj is not None:
                     pos = obj.pose.p
-                    safety_bubbles.append((pos[0], pos[1], SAFETY_BUBBLE_RADIUS))
-                    print(f"[Distractor] Safety bubble around {attr}: center=({pos[0]:.3f}, {pos[1]:.3f}), radius={SAFETY_BUBBLE_RADIUS}m")
+                    if hasattr(base_env, bbox_attr):
+                        bbox = getattr(base_env, bbox_attr)
+                        if bbox is not None:
+                            bbox_radius = np.sqrt(bbox[0]**2 + bbox[1]**2) / 2
+                            radius = bbox_radius + SAFETY_PADDING
+                        else:
+                            radius = FALLBACK_RADIUS
+                    else:
+                        radius = FALLBACK_RADIUS
+                    safety_bubbles.append((pos[0], pos[1], radius))
+                    print(f"[Distractor] Safety bubble: {obj_attr} at ({pos[0]:.3f}, {pos[1]:.3f}), r={radius:.3f}m")
 
-        # Table bounds - based on Bridge task object placement
-        # Task objects are at xy_center=[-0.16, 0.00] with ±0.075 range
-        # So task area is roughly x: -0.235 to -0.085, y: -0.075 to 0.075
-        # IMPORTANT: Table collision geometry is limited - stay well within bounds
-        TABLE_X_MIN, TABLE_X_MAX = -0.22, -0.10  # Stay within known table surface
-        TABLE_Y_MIN, TABLE_Y_MAX = -0.10, 0.10   # Conservative Y bounds
+        EDGE_MARGIN = 0.02  # Keep object centers 2cm from edges
 
-        # Safe positions for distractors (corners and edges of safe area)
-        # These should all be on the physical table surface
-        edge_positions = [
-            (-0.20, -0.08),   # Back-left (near task area but outside)
-            (-0.20, 0.08),    # Back-right
-            (-0.12, -0.08),   # Front-left
-            (-0.12, 0.08),    # Front-right
-            (-0.16, -0.09),   # Center-left (beside task area)
-            (-0.16, 0.09),    # Center-right
-        ]
+        # Compute centroid of task objects for grid centering
+        if safety_bubbles:
+            centroid_x = np.mean([b[0] for b in safety_bubbles])
+            centroid_y = np.mean([b[1] for b in safety_bubbles])
+        else:
+            # Fallback to surface center if no task objects
+            centroid_x = (X_MIN + X_MAX) / 2
+            centroid_y = (Y_MIN + Y_MAX) / 2
+        print(f"[Distractor] Task centroid: ({centroid_x:.3f}, {centroid_y:.3f})")
 
-        # Track placed distractor positions to avoid stacking
-        placed_positions = []
+        # Grid centered around task objects
+        # Use smaller grid for sink (limited space)
+        if is_sink_task:
+            GRID_RADIUS_X = 0.10  # 10cm in each X direction from centroid
+            GRID_RADIUS_Y = 0.15  # 15cm in each Y direction from centroid
+        else:
+            GRID_RADIUS_X = 0.15  # 15cm in each X direction from centroid
+            GRID_RADIUS_Y = 0.20  # 20cm in each Y direction from centroid
 
-        for i, obj in enumerate(self.distractor_objs):
-            max_attempts = 50
-            valid = False
-            x, y = 0, 0
+        grid_x_min = max(X_MIN, centroid_x - GRID_RADIUS_X)
+        grid_x_max = min(X_MAX, centroid_x + GRID_RADIUS_X)
+        grid_y_min = max(Y_MIN, centroid_y - GRID_RADIUS_Y)
+        grid_y_max = min(Y_MAX, centroid_y + GRID_RADIUS_Y)
 
-            for attempt in range(max_attempts):
-                if i < len(edge_positions) and attempt == 0:
-                    # Try edge position first with small jitter
-                    x, y = edge_positions[i]
-                    x += rng.uniform(-0.02, 0.02)
-                    y += rng.uniform(-0.02, 0.02)
-                    # Clamp to valid bounds
-                    x = max(TABLE_X_MIN, min(TABLE_X_MAX, x))
-                    y = max(TABLE_Y_MIN, min(TABLE_Y_MAX, y))
-                else:
-                    # Random position in valid table area
-                    x = rng.uniform(TABLE_X_MIN, TABLE_X_MAX)
-                    y = rng.uniform(TABLE_Y_MIN, TABLE_Y_MAX)
+        print(f"[Distractor] Centered grid: X:[{grid_x_min:.3f}, {grid_x_max:.3f}], Y:[{grid_y_min:.3f}, {grid_y_max:.3f}]")
 
-                # Check against task object safety bubbles (circular distance)
-                valid = True
-                for bx, by, radius in safety_bubbles:
-                    dist = np.sqrt((x - bx)**2 + (y - by)**2)
-                    if dist < radius:
-                        valid = False
-                        break
+        # Grid parameters (4x4=16 cells)
+        GRID_COLS = 4
+        GRID_ROWS = 4
+        cell_width = (grid_x_max - grid_x_min - 2 * EDGE_MARGIN) / GRID_COLS
+        cell_height = (grid_y_max - grid_y_min - 2 * EDGE_MARGIN) / GRID_ROWS
 
-                # Also check against already-placed distractors (10cm minimum spacing)
-                if valid:
-                    for px, py in placed_positions:
-                        dist = np.sqrt((x - px)**2 + (y - py)**2)
-                        if dist < 0.10:
-                            valid = False
-                            break
+        print(f"[Distractor] Grid: {GRID_COLS}x{GRID_ROWS}, cell size: {cell_width:.3f}x{cell_height:.3f}m")
 
-                if valid:
+        # Build list of grid cells as (center_x, center_y)
+        grid_cells = []
+        for row in range(GRID_ROWS):
+            for col in range(GRID_COLS):
+                cx = grid_x_min + EDGE_MARGIN + (col + 0.5) * cell_width
+                cy = grid_y_min + EDGE_MARGIN + (row + 0.5) * cell_height
+                grid_cells.append((cx, cy))
+
+        # Filter out cells that overlap with safety bubbles
+        available_cells = []
+        for cx, cy in grid_cells:
+            in_bubble = False
+            for bx, by, radius in safety_bubbles:
+                # Check if cell center is inside bubble (just use bubble radius, no cell margin)
+                dist = np.sqrt((cx - bx)**2 + (cy - by)**2)
+                if dist < radius:
+                    in_bubble = True
                     break
+            if not in_bubble:
+                available_cells.append((cx, cy))
 
-            # Only place if valid position found
-            if not valid:
-                print(f"[Distractor] WARNING: Could not find valid position for {obj.name} after {max_attempts} attempts, skipping")
-                # Move object far away (off-table) so it doesn't interfere
-                obj.set_pose(sapien.Pose([10, 10, -10], [1, 0, 0, 0]))
-                continue
+        print(f"[Distractor] Available cells: {len(available_cells)}/{len(grid_cells)} (after removing safety zones)")
 
-            # Record this position
-            placed_positions.append((x, y))
+        # Shuffle available cells for random assignment
+        available_cells = list(available_cells)  # Make a copy
+        rng.shuffle(available_cells)
 
-            # Spawn slightly above table (0.1m) to avoid excessive bouncing
-            z = table_height + 0.10
-            obj.set_pose(sapien.Pose([x, y, z], [1, 0, 0, 0]))
-            print(f"[Distractor] Positioned {obj.name} at ({x:.3f}, {y:.3f}, {z:.3f})")
+        # Place each distractor in a cell
+        for i, obj in enumerate(self.distractor_objs):
+            my_radius = self.distractor_radii[i]
 
-        return safety_bubbles
+            if i < len(available_cells):
+                # Use a cell - add jitter within cell
+                cx, cy = available_cells[i]
+                jitter_x = rng.uniform(-cell_width * 0.3, cell_width * 0.3)
+                jitter_y = rng.uniform(-cell_height * 0.3, cell_height * 0.3)
+                x = cx + jitter_x
+                y = cy + jitter_y
+                cell_idx = i
+            else:
+                # No cells left - place in top row (Y+) with spacing, staying within centered grid
+                print(f"[Distractor] WARNING: No cell for {obj.name}, using overflow position")
+                overflow_idx = i - len(available_cells)
+                # Spread overflow objects across X range in Y+ region of centered grid
+                x = grid_x_min + EDGE_MARGIN + 0.03 + (overflow_idx % 4) * 0.05
+                y = grid_y_max - EDGE_MARGIN - 0.03 - (overflow_idx // 4) * 0.05
+                # Clamp to centered grid bounds
+                x = max(grid_x_min + EDGE_MARGIN, min(x, grid_x_max - EDGE_MARGIN))
+                y = max(grid_y_min + EDGE_MARGIN, min(y, grid_y_max - EDGE_MARGIN))
+                cell_idx = -1
+
+            # Spawn above surface (table or sink basin)
+            z = surface_height + 0.10
+
+            # Random rotation
+            angle = rng.uniform(0, 2 * np.pi)
+            quat = [np.cos(angle/2), 0, 0, np.sin(angle/2)]
+
+            obj.set_pose(sapien.Pose([x, y, z], quat))
+            print(f"[Distractor] Positioned {obj.name} at ({x:.3f}, {y:.3f}, {z:.3f}), cell={cell_idx}, rot={np.degrees(angle):.0f}°")
+
+
+        # Return safety bubbles and grid bounds for use by relocation methods
+        grid_bounds = (grid_x_min, grid_x_max, grid_y_min, grid_y_max)
+        return safety_bubbles, grid_bounds
 
     def _count_visible_distractors(self, initial_positions=None):
-        """Count how many distractors are still on/above the table after physics.
+        """Count how many distractors are still on/above the surface after physics.
 
         Args:
             initial_positions: List of (x, y, z) tuples of initial spawn positions.
                                If provided, also checks for objects stuck to robot.
         """
-        table_height = 0.87
+        # Use stored surface height from _position_distractors, or default to table
+        surface_height = getattr(self, '_surface_height', 0.87)
         count = 0
         for i, obj in enumerate(self.distractor_objs):
             pos = obj.pose.p
             x, y, z = pos[0], pos[1], pos[2]
 
-            # Check if fell off table
-            if z < table_height - 0.1:
-                print(f"[Distractor] WARNING: {obj.name} fell off table (z={z:.3f})")
+            # Check if fell off surface
+            if z < surface_height - 0.1:
+                print(f"[Distractor] WARNING: {obj.name} fell off surface (z={z:.3f})")
                 continue
 
-            # Check if in robot workspace (x > -0.10 means likely stuck to robot)
-            if x > -0.10:
+            # Check if in robot workspace (x > -0.08 means likely stuck to robot)
+            # Table bounds go up to x=-0.09, so use -0.08 as threshold
+            if x > -0.08:
                 print(f"[Distractor] WARNING: {obj.name} in robot workspace (x={x:.3f})")
                 continue
 
             # Check if object moved significantly from initial spawn position
-            # (objects that get stuck often don't fall to table properly)
+            # Objects spawn 0.08m above table, so expect ~0.06-0.08m fall
+            # Use 0.04m threshold to catch truly stuck objects (didn't fall at all)
             if initial_positions and i < len(initial_positions):
                 init_x, init_y, init_z = initial_positions[i]
-                if abs(z - init_z) < 0.1:  # Didn't fall much - might be stuck
+                if abs(z - init_z) < 0.04:  # Didn't fall much - might be stuck
                     print(f"[Distractor] WARNING: {obj.name} may be stuck (z barely changed: {init_z:.3f} -> {z:.3f})")
                     continue
 
@@ -362,18 +490,18 @@ class DistractorWrapper:
 
         return count
 
-    def _relocate_bubble_violators(self, safety_bubbles, rng):
+    def _relocate_bubble_violators(self, safety_bubbles, rng, grid_bounds):
         """Relocate distractors that ended up inside safety bubbles after physics.
 
         Instead of removing objects, tries to find a new valid position and respawn them.
         Only removes if no valid position can be found after max attempts.
         """
         base_env = self.env.unwrapped
-        table_height = 0.87
+        # Use stored surface height from _position_distractors, or default to table
+        surface_height = getattr(self, '_surface_height', 0.87)
 
-        # Table bounds (same as _position_distractors)
-        TABLE_X_MIN, TABLE_X_MAX = -0.22, -0.10
-        TABLE_Y_MIN, TABLE_Y_MAX = -0.10, 0.10
+        # Use centered grid bounds from _position_distractors
+        grid_x_min, grid_x_max, grid_y_min, grid_y_max = grid_bounds
 
         relocated = []
         removed = []
@@ -401,9 +529,9 @@ class DistractorWrapper:
             found_position = False
 
             for attempt in range(max_attempts):
-                # Random position in valid table area
-                new_x = rng.uniform(TABLE_X_MIN, TABLE_X_MAX)
-                new_y = rng.uniform(TABLE_Y_MIN, TABLE_Y_MAX)
+                # Random position in centered grid area
+                new_x = rng.uniform(grid_x_min, grid_x_max)
+                new_y = rng.uniform(grid_y_min, grid_y_max)
 
                 # Check against safety bubbles
                 valid = True
@@ -423,7 +551,7 @@ class DistractorWrapper:
 
                 if valid:
                     # Found valid position - relocate object
-                    new_z = table_height + 0.02  # Slightly above table
+                    new_z = surface_height + 0.02  # Slightly above surface
                     obj.set_pose(sapien.Pose([new_x, new_y, new_z], [1, 0, 0, 0]))
                     obj.set_velocity(np.zeros(3))
                     obj.set_angular_velocity(np.zeros(3))
@@ -433,26 +561,23 @@ class DistractorWrapper:
                     break
 
             if not found_position:
-                # No valid position found - remove as last resort
-                print(f"[Distractor] REMOVING {obj.name} - no valid position found after {max_attempts} attempts")
-                base_env._scene.remove_actor(obj)
-                self.distractor_objs.remove(obj)
-                removed.append(obj.name)
+                # No valid position found - leave in place instead of removing
+                print(f"[Distractor] KEEPING {obj.name} in place - no valid position found after {max_attempts} attempts")
 
         return relocated, removed
 
-    def _relocate_touching_distractors(self, safety_bubbles, rng, min_dist=0.05):
+    def _relocate_touching_distractors(self, safety_bubbles, rng, grid_bounds, min_dist=0.05):
         """Relocate distractors that are too close to each other after physics settling.
 
         When two objects are too close, relocates the one that was added later (higher index).
         Only removes if no valid position can be found.
         """
         base_env = self.env.unwrapped
-        table_height = 0.87
+        # Use stored surface height from _position_distractors, or default to table
+        surface_height = getattr(self, '_surface_height', 0.87)
 
-        # Table bounds (same as _position_distractors)
-        TABLE_X_MIN, TABLE_X_MAX = -0.22, -0.10
-        TABLE_Y_MIN, TABLE_Y_MAX = -0.10, 0.10
+        # Use centered grid bounds from _position_distractors
+        grid_x_min, grid_x_max, grid_y_min, grid_y_max = grid_bounds
 
         relocated = []
         removed = []
@@ -481,8 +606,8 @@ class DistractorWrapper:
             found_position = False
 
             for attempt in range(max_attempts):
-                new_x = rng.uniform(TABLE_X_MIN, TABLE_X_MAX)
-                new_y = rng.uniform(TABLE_Y_MIN, TABLE_Y_MAX)
+                new_x = rng.uniform(grid_x_min, grid_x_max)
+                new_y = rng.uniform(grid_y_min, grid_y_max)
 
                 # Check against safety bubbles
                 valid = True
@@ -512,7 +637,7 @@ class DistractorWrapper:
                                 break
 
                 if valid:
-                    new_z = table_height + 0.02
+                    new_z = surface_height + 0.02
                     obj.set_pose(sapien.Pose([new_x, new_y, new_z], [1, 0, 0, 0]))
                     obj.set_velocity(np.zeros(3))
                     obj.set_angular_velocity(np.zeros(3))
@@ -522,10 +647,8 @@ class DistractorWrapper:
                     break
 
             if not found_position:
-                print(f"[Distractor] REMOVING {obj.name} - no valid position found after {max_attempts} attempts")
-                base_env._scene.remove_actor(obj)
-                self.distractor_objs.remove(obj)
-                removed.append(obj.name)
+                # No valid position found - leave in place instead of removing
+                print(f"[Distractor] KEEPING {obj.name} in place - no valid position found after {max_attempts} attempts")
 
         return relocated, removed
 
@@ -543,6 +666,7 @@ class DistractorWrapper:
         # Reset state
         self._distractors_loaded = False
         self.distractor_objs = []
+        self.distractor_radii = []
 
         obs, info = self.env.reset(**kwargs)
 
@@ -551,7 +675,7 @@ class DistractorWrapper:
 
         # Position them randomly (spawns 0.5m above table)
         rng = np.random.RandomState(kwargs.get("options", {}).get("obj_init_options", {}).get("episode_id", 0))
-        safety_bubbles = self._position_distractors(rng)
+        safety_bubbles, grid_bounds = self._position_distractors(rng)
 
         # Record initial positions before physics
         initial_positions = []
@@ -586,21 +710,16 @@ class DistractorWrapper:
                 base_env._scene.step()
 
         # Relocate distractors that drifted into safety bubbles during physics
-        relocated, removed = self._relocate_bubble_violators(safety_bubbles, rng)
+        relocated, removed = self._relocate_bubble_violators(safety_bubbles, rng, grid_bounds)
         if relocated:
             print(f"[Distractor] Relocated {len(relocated)} objects that were in safety bubbles: {relocated}")
         if removed:
             print(f"[Distractor] Removed {len(removed)} objects (no valid position found): {removed}")
 
-        # Relocate distractors that ended up too close to each other after settling
-        relocated_touching, removed_touching = self._relocate_touching_distractors(safety_bubbles, rng, min_dist=0.05)
-        if relocated_touching:
-            print(f"[Distractor] Relocated {len(relocated_touching)} objects that were touching: {relocated_touching}")
-        if removed_touching:
-            print(f"[Distractor] Removed {len(removed_touching)} touching objects (no valid position): {removed_touching}")
+        # Note: Not relocating distractors that are close to each other - physics handles this naturally
 
         # Quick physics settle after any relocations (0.3s)
-        if relocated or relocated_touching:
+        if relocated:
             print(f"[Distractor] Settling relocated objects...")
             for _ in range(int(sim_freq * 0.3)):
                 base_env._scene.step()
