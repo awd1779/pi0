@@ -325,8 +325,10 @@ class DistractorWrapper:
         SAFETY_PADDING = 0.0  # No padding - distractors can touch task object bounding boxes
         FALLBACK_RADIUS = 0.06  # 6cm fallback if no bounding box available
 
-        # Get task object positions for safety bubbles
+        # Get task object positions for safety bubbles (and centroid calculation)
+        # For sink task, we skip safety bubbles but still need positions for centroid
         safety_bubbles = []  # List of (x, y, radius)
+        task_object_positions = []  # For centroid calculation
         obj_bbox_attrs = {
             'episode_source_obj': 'episode_source_obj_bbox_world',
             'episode_target_obj': 'episode_target_obj_bbox_world',
@@ -337,6 +339,13 @@ class DistractorWrapper:
                 obj = getattr(base_env, obj_attr)
                 if obj is not None:
                     pos = obj.pose.p
+                    task_object_positions.append((pos[0], pos[1]))
+
+                    # Skip safety bubbles for sink task (limited space)
+                    if is_sink_task:
+                        print(f"[Distractor] Task object: {obj_attr} at ({pos[0]:.3f}, {pos[1]:.3f}) - no safety bubble (sink task)")
+                        continue
+
                     if hasattr(base_env, bbox_attr):
                         bbox = getattr(base_env, bbox_attr)
                         if bbox is not None:
@@ -352,9 +361,9 @@ class DistractorWrapper:
         EDGE_MARGIN = 0.02  # Keep object centers 2cm from edges
 
         # Compute centroid of task objects for grid centering
-        if safety_bubbles:
-            centroid_x = np.mean([b[0] for b in safety_bubbles])
-            centroid_y = np.mean([b[1] for b in safety_bubbles])
+        if task_object_positions:
+            centroid_x = np.mean([p[0] for p in task_object_positions])
+            centroid_y = np.mean([p[1] for p in task_object_positions])
         else:
             # Fallback to surface center if no task objects
             centroid_x = (X_MIN + X_MAX) / 2
