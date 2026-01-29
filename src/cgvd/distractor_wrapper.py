@@ -294,8 +294,14 @@ class DistractorWrapper:
 
         # Sink basin bounds (for eggplant task) - from collision mesh analysis
         # Basin interior world coords where objects can rest
-        SINK_X_MIN, SINK_X_MAX = -0.276, -0.045
-        SINK_Y_MIN, SINK_Y_MAX = -0.052, 0.303
+        # Raw bounds: X: -0.276 to -0.045, Y: -0.052 to 0.303
+        # Add inner margin to keep objects away from basin walls/rim
+        # Use minimal margin on right (X+) side to spread objects wider towards robot
+        SINK_MARGIN_LEFT = 0.02   # 2cm from left wall
+        SINK_MARGIN_RIGHT = 0.01  # 1cm from right wall (maximize spread towards right)
+        SINK_MARGIN_Y = 0.02      # 2cm from front/back walls
+        SINK_X_MIN, SINK_X_MAX = -0.276 + SINK_MARGIN_LEFT, -0.045 - SINK_MARGIN_RIGHT
+        SINK_Y_MIN, SINK_Y_MAX = -0.052 + SINK_MARGIN_Y, 0.303 - SINK_MARGIN_Y
         SINK_Z = 0.88  # Basin floor height
 
         # Table bounds (for other tasks) - from bridge_table_1_v1 collision mesh
@@ -341,9 +347,10 @@ class DistractorWrapper:
                     pos = obj.pose.p
                     task_object_positions.append((pos[0], pos[1]))
 
-                    # Skip safety bubbles for sink task (limited space)
-                    if is_sink_task:
-                        print(f"[Distractor] Task object: {obj_attr} at ({pos[0]:.3f}, {pos[1]:.3f}) - no safety bubble (sink task)")
+                    # For sink task: skip safety bubble for source (eggplant) but KEEP for target (basket)
+                    # This prevents distractors from landing on the basket
+                    if is_sink_task and obj_attr == 'episode_source_obj':
+                        print(f"[Distractor] Task object: {obj_attr} at ({pos[0]:.3f}, {pos[1]:.3f}) - no safety bubble (source in sink)")
                         continue
 
                     if hasattr(base_env, bbox_attr):
@@ -355,6 +362,11 @@ class DistractorWrapper:
                             radius = FALLBACK_RADIUS
                     else:
                         radius = FALLBACK_RADIUS
+
+                    # Use larger safety radius for basket in sink task
+                    if is_sink_task and obj_attr == 'episode_target_obj':
+                        radius = max(radius, 0.08)  # At least 8cm radius around basket
+
                     safety_bubbles.append((pos[0], pos[1], radius))
                     print(f"[Distractor] Safety bubble: {obj_attr} at ({pos[0]:.3f}, {pos[1]:.3f}), r={radius:.3f}m")
 
@@ -364,6 +376,12 @@ class DistractorWrapper:
         if task_object_positions:
             centroid_x = np.mean([p[0] for p in task_object_positions])
             centroid_y = np.mean([p[1] for p in task_object_positions])
+            # For sink task, bias centroid towards eggplant (source) and away from basket (target)
+            # Eggplant is at Y~0.20, basket at Y~0.025
+            if is_sink_task and len(task_object_positions) >= 2:
+                # Use source position (eggplant) for Y, keep X centered
+                source_y = task_object_positions[0][1]  # First is source
+                centroid_y = source_y  # Center grid around eggplant Y
         else:
             # Fallback to surface center if no task objects
             centroid_x = (X_MIN + X_MAX) / 2
@@ -373,7 +391,7 @@ class DistractorWrapper:
         # Grid centered around task objects
         # Use smaller grid for sink (limited space)
         if is_sink_task:
-            GRID_RADIUS_X = 0.10  # 10cm in each X direction from centroid
+            GRID_RADIUS_X = 0.15  # 15cm in each X direction from centroid (wider spread)
             GRID_RADIUS_Y = 0.15  # 15cm in each Y direction from centroid
         else:
             GRID_RADIUS_X = 0.15  # 15cm in each X direction from centroid
@@ -426,10 +444,11 @@ class DistractorWrapper:
             my_radius = self.distractor_radii[i]
 
             if i < len(available_cells):
-                # Use a cell - add jitter within cell
+                # Use a cell - add small jitter within cell to avoid perfect grid
                 cx, cy = available_cells[i]
-                jitter_x = rng.uniform(-cell_width * 0.3, cell_width * 0.3)
-                jitter_y = rng.uniform(-cell_height * 0.3, cell_height * 0.3)
+                jitter_factor = 0.15  # 15% jitter for both table and sink
+                jitter_x = rng.uniform(-cell_width * jitter_factor, cell_width * jitter_factor)
+                jitter_y = rng.uniform(-cell_height * jitter_factor, cell_height * jitter_factor)
                 x = cx + jitter_x
                 y = cy + jitter_y
                 cell_idx = i
@@ -446,19 +465,47 @@ class DistractorWrapper:
                 cell_idx = -1
 
             # Spawn above surface (table or sink basin)
-            z = surface_height + 0.10
+            # Use higher spawn for sink task to clear the basin walls
+            # For sink: stagger heights to prevent mid-air collisions during falling
+            # For table: no stagger to avoid bouncing off table (10cm is sufficient)
+            if is_sink_task:
+                stagger_offset = i * 0.03  # 3cm higher for each subsequent object
+                z = surface_height + 0.15 + stagger_offset  # 15cm+ above sink basin
+            else:
+                z = surface_height + 0.10  # 10cm above table (no stagger)
 
-            # Random rotation
-            angle = rng.uniform(0, 2 * np.pi)
-            quat = [np.cos(angle/2), 0, 0, np.sin(angle/2)]
+            # No rotation - use identity quaternion
+            quat = [1, 0, 0, 0]
 
             obj.set_pose(sapien.Pose([x, y, z], quat))
-            print(f"[Distractor] Positioned {obj.name} at ({x:.3f}, {y:.3f}, {z:.3f}), cell={cell_idx}, rot={np.degrees(angle):.0f}°")
+            print(f"[Distractor] Positioned {obj.name} at ({x:.3f}, {y:.3f}, {z:.3f}), cell={cell_idx}")
 
 
         # Return safety bubbles and grid bounds for use by relocation methods
         grid_bounds = (grid_x_min, grid_x_max, grid_y_min, grid_y_max)
         return safety_bubbles, grid_bounds
+
+    def _fix_clipped_objects(self):
+        """Fix objects that clipped through the surface during physics settling.
+
+        Small objects can penetrate collision meshes. This repositions any object
+        that ended up below the surface height.
+        """
+        surface_height = getattr(self, '_surface_height', 0.87)
+        fixed_count = 0
+
+        for obj in self.distractor_objs:
+            pos = obj.pose.p
+            if pos[2] < surface_height:
+                # Object clipped into/through the surface - reposition it
+                new_z = surface_height + 0.05  # 5cm above surface
+                obj.set_pose(sapien.Pose([pos[0], pos[1], new_z], obj.pose.q))
+                obj.set_velocity(np.zeros(3))
+                obj.set_angular_velocity(np.zeros(3))
+                print(f"[Distractor] FIXED: {obj.name} clipped through surface (z={pos[2]:.3f} -> {new_z:.3f})")
+                fixed_count += 1
+
+        return fixed_count
 
     def _count_visible_distractors(self, initial_positions=None):
         """Count how many distractors are still on/above the surface after physics.
@@ -696,19 +743,24 @@ class DistractorWrapper:
         base_env = self.env.unwrapped
         sim_freq = getattr(base_env, 'sim_freq', 500)
 
-        # Phase 1: Lock rotation (prevent tipping), settle 0.5s
+        # Settling times differ by task: longer for sink (staggered drops), shorter for table
+        is_sink_task = getattr(self, '_is_sink_task', False)
+        settle_phase1 = 0.8 if is_sink_task else 0.5
+        settle_phase2 = 0.7 if is_sink_task else 0.5
+
+        # Phase 1: Lock rotation (prevent tipping), settle
         for obj in self.distractor_objs:
             obj.lock_motion(0, 0, 0, 1, 1, 0)  # lock x,y rotation, allow z rotation
-        for _ in range(int(sim_freq * 0.5)):
+        for _ in range(int(sim_freq * settle_phase1)):
             base_env._scene.step()
 
-        # Phase 2: Unlock, reset velocities, settle 0.5s more
+        # Phase 2: Unlock, reset velocities, settle more
         for obj in self.distractor_objs:
             obj.lock_motion(0, 0, 0, 0, 0, 0)  # unlock all
             obj.set_pose(obj.pose)  # explicit set to prevent sleep
             obj.set_velocity(np.zeros(3))
             obj.set_angular_velocity(np.zeros(3))
-        for _ in range(int(sim_freq * 0.5)):
+        for _ in range(int(sim_freq * settle_phase2)):
             base_env._scene.step()
 
         # Phase 3: Check if still moving, settle more if needed
@@ -731,6 +783,14 @@ class DistractorWrapper:
         if relocated:
             print(f"[Distractor] Settling relocated objects...")
             for _ in range(int(sim_freq * 0.3)):
+                base_env._scene.step()
+
+        # Fix any objects that clipped through the surface (common with small objects)
+        fixed_count = self._fix_clipped_objects()
+        if fixed_count > 0:
+            print(f"[Distractor] Fixed {fixed_count} objects that clipped through surface")
+            # Brief settle after fixing
+            for _ in range(int(sim_freq * 0.1)):
                 base_env._scene.step()
 
         # Log how many distractors are visible after settling
