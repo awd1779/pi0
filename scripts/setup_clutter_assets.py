@@ -153,6 +153,128 @@ def convert_ycb_asset(model_id, model_info, ycb_models_dir, output_dir):
     }
 
 
+def merge_obj_files(obj_files, output_path):
+    """Merge multiple OBJ files into a single file.
+
+    RoboCasa assets have multiple mesh parts (model_normalized_0.obj, _1.obj, etc.).
+    This function merges them into a single file, properly handling:
+    - Vertex position offsets (v)
+    - Texture coordinate offsets (vt)
+    - Vertex normal offsets (vn)
+    - Material library references (mtllib)
+    - Material usage (usemtl)
+
+    Args:
+        obj_files: List of Path objects to OBJ files to merge
+        output_path: Path to write the merged OBJ file
+
+    Returns:
+        Tuple of (num_vertices, num_faces) in merged file
+    """
+    all_vertices = []      # v lines
+    all_texcoords = []     # vt lines
+    all_normals = []       # vn lines
+    all_faces = []         # f lines only
+    mtllib = None          # Material library reference
+    usemtl = None          # Material usage (capture first one)
+
+    vertex_offset = 0
+    texcoord_offset = 0
+    normal_offset = 0
+
+    for obj_file in obj_files:
+        vertices = []
+        texcoords = []
+        normals = []
+        faces = []
+
+        with open(obj_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('mtllib ') and mtllib is None:
+                    # Capture material library from first file that has it
+                    mtllib = line
+                elif line.startswith('usemtl ') and usemtl is None:
+                    # Capture material usage from first file
+                    usemtl = line
+                elif line.startswith('v '):
+                    # Vertex position: v x y z
+                    vertices.append(line)
+                elif line.startswith('vt '):
+                    # Texture coordinate: vt u v
+                    texcoords.append(line)
+                elif line.startswith('vn '):
+                    # Vertex normal: vn x y z
+                    normals.append(line)
+                elif line.startswith('f '):
+                    # Face line: f v1/vt1/vn1 v2/vt2/vn2 ...
+                    parts = line.split()
+                    new_parts = ['f']
+                    for part in parts[1:]:
+                        # Handle formats: v, v/vt, v/vt/vn, v//vn
+                        indices = part.split('/')
+                        # Offset vertex index
+                        new_vertex_idx = int(indices[0]) + vertex_offset
+
+                        if len(indices) == 1:
+                            new_parts.append(str(new_vertex_idx))
+                        elif len(indices) == 2:
+                            # v/vt format
+                            new_vt_idx = int(indices[1]) + texcoord_offset if indices[1] else ''
+                            new_parts.append(f"{new_vertex_idx}/{new_vt_idx}")
+                        else:
+                            # v/vt/vn or v//vn format
+                            new_vt_idx = int(indices[1]) + texcoord_offset if indices[1] else ''
+                            new_vn_idx = int(indices[2]) + normal_offset if indices[2] else ''
+                            new_parts.append(f"{new_vertex_idx}/{new_vt_idx}/{new_vn_idx}")
+
+                    faces.append(' '.join(new_parts))
+
+        all_vertices.extend(vertices)
+        all_texcoords.extend(texcoords)
+        all_normals.extend(normals)
+        all_faces.extend(faces)
+
+        vertex_offset += len(vertices)
+        texcoord_offset += len(texcoords)
+        normal_offset += len(normals)
+
+    # Write merged file in correct OBJ order:
+    # 1. Header comment
+    # 2. mtllib (material library)
+    # 3. usemtl (material usage) - must be before geometry for textures to work
+    # 4. vertices (v)
+    # 5. texture coords (vt)
+    # 6. normals (vn)
+    # 7. faces (f)
+    with open(output_path, 'w') as f:
+        f.write(f"# Merged from {len(obj_files)} OBJ files\n")
+
+        # Write material references at top (required for textures)
+        if mtllib:
+            f.write(mtllib + '\n')
+        if usemtl:
+            f.write(usemtl + '\n')
+
+        # Write all vertices
+        for v in all_vertices:
+            f.write(v + '\n')
+
+        # Write all texture coordinates
+        for vt in all_texcoords:
+            f.write(vt + '\n')
+
+        # Write all normals
+        for vn in all_normals:
+            f.write(vn + '\n')
+
+        # Write all faces
+        for face in all_faces:
+            f.write(face + '\n')
+
+    return len(all_vertices), len(all_faces)
+
+
 def convert_robocasa_asset(model_id, model_info, output_dir):
     """Convert a single RoboCasa asset to SimplerEnv format."""
     src_dir = Path(model_info["path"])
@@ -168,19 +290,33 @@ def convert_robocasa_asset(model_id, model_info, output_dir):
     collision_dir = src_dir / "collision"
     visual_dir = src_dir / "visual"
 
-    # Copy collision mesh (use first one if multiple parts)
+    # Merge all collision mesh parts into single collision.obj
+    # RoboCasa assets have multiple parts (model_normalized_collision_0.obj, _1.obj, etc.)
+    # We must merge them to get the complete collision geometry
     if collision_dir.exists():
         collision_files = sorted(collision_dir.glob("*.obj"))
         if collision_files:
-            # Use model_normalized_collision_0.obj as primary collision mesh
-            shutil.copy2(collision_files[0], dst_dir / "collision.obj")
+            if len(collision_files) == 1:
+                # Single file - just copy it
+                shutil.copy2(collision_files[0], dst_dir / "collision.obj")
+            else:
+                # Multiple files - merge them
+                num_verts, num_faces = merge_obj_files(collision_files, dst_dir / "collision.obj")
+                print(f"    Merged {len(collision_files)} collision parts -> {num_verts} vertices, {num_faces} faces")
 
-    # Copy visual mesh and textures
+    # Merge all visual mesh parts into single textured.obj
+    # RoboCasa assets have multiple visual parts (model_normalized_0.obj, _1.obj, etc.)
+    # We must merge them to get the complete visual geometry
     if visual_dir.exists():
-        # Copy the main visual mesh (model_normalized_0.obj)
         visual_files = sorted(visual_dir.glob("model_normalized*.obj"))
         if visual_files:
-            shutil.copy2(visual_files[0], dst_dir / "textured.obj")
+            if len(visual_files) == 1:
+                # Single file - just copy it
+                shutil.copy2(visual_files[0], dst_dir / "textured.obj")
+            else:
+                # Multiple files - merge them
+                num_verts, num_faces = merge_obj_files(visual_files, dst_dir / "textured.obj")
+                print(f"    Merged {len(visual_files)} visual parts -> {num_verts} vertices, {num_faces} faces")
 
         # Copy material file
         mtl_files = list(visual_dir.glob("*.mtl"))

@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import numpy as np
 import sapien.core as sapien
 from pathlib import Path
@@ -41,6 +43,52 @@ def get_actor_xy_radius(actor):
         max_radius = max(max_radius, radius)
 
     return max_radius
+
+
+def get_actor_z_bounds(actor) -> Tuple[float, float]:
+    """Get the min/max Z coordinates of an actor's collision geometry.
+
+    IMPORTANT: Geometry vertices must be multiplied by geom.scale to get
+    actual coordinates (scale is applied separately, not baked into vertices).
+
+    This is needed because RoboCasa collision meshes are NOT centered at the
+    origin. For example, rc_squash_16 has Z center at -0.296 (mesh 30cm below
+    origin!). When we set obj.set_pose([x, y, z]), the mesh geometry extends
+    based on its bounds, not the origin.
+
+    Returns:
+        Tuple of (z_min, z_max) relative to actor origin
+    """
+    z_min, z_max = float('inf'), float('-inf')
+
+    for shape in actor.get_collision_shapes():
+        geom = shape.geometry
+
+        if isinstance(geom, sapien.ConvexMeshGeometry):
+            # Convex mesh - multiply vertices by scale (same as get_actor_xy_radius)
+            verts = np.array(geom.vertices) * np.array(geom.scale)
+            z_min = min(z_min, verts[:, 2].min())
+            z_max = max(z_max, verts[:, 2].max())
+
+        elif isinstance(geom, sapien.BoxGeometry):
+            hz = geom.half_lengths[2]
+            z_min = min(z_min, -hz)
+            z_max = max(z_max, hz)
+
+        elif isinstance(geom, sapien.SphereGeometry):
+            r = geom.radius
+            z_min = min(z_min, -r)
+            z_max = max(z_max, r)
+
+        elif isinstance(geom, sapien.CapsuleGeometry):
+            r = geom.radius
+            h = geom.half_length
+            z_min = min(z_min, -r - h)
+            z_max = max(z_max, r + h)
+
+    if z_min == float('inf'):
+        return (-0.05, 0.05)  # Fallback: assume 10cm tall object centered at origin
+    return (z_min, z_max)
 
 
 # ============================================================================
@@ -209,6 +257,7 @@ class DistractorWrapper:
         self.external_asset_scale = external_asset_scale if external_asset_scale is not None else self.DEFAULT_EXTERNAL_ASSET_SCALE
         self.distractor_objs = []
         self.distractor_radii = []  # XY bounding radius for each distractor
+        self.distractor_z_bounds = []  # Z bounds (z_min, z_max) for each distractor
         self._distractors_loaded = False
 
     def _load_distractors(self):
@@ -271,7 +320,11 @@ class DistractorWrapper:
             # Compute XY bounding radius from collision geometry
             xy_radius = get_actor_xy_radius(obj)
             self.distractor_radii.append(xy_radius)
-            print(f"[Distractor] Loaded: {model_id} (scale={scale:.3f}, {scale_source}, radius={xy_radius:.3f}m)")
+
+            # Compute Z bounds for mesh-aware spawn height
+            z_min, z_max = get_actor_z_bounds(obj)
+            self.distractor_z_bounds.append((z_min, z_max))
+            print(f"[Distractor] Loaded: {model_id} (scale={scale:.3f}, {scale_source}, radius={xy_radius:.3f}m, z_bounds=({z_min:.3f}, {z_max:.3f}))")
 
         self._distractors_loaded = True
         print(f"[Distractor] Successfully loaded {len(self.distractor_objs)} distractor(s)")
@@ -328,7 +381,7 @@ class DistractorWrapper:
         self._is_sink_task = is_sink_task
 
         # Safety bubble parameters
-        SAFETY_PADDING = 0.0  # No padding - distractors can touch task object bounding boxes
+        SAFETY_PADDING = 0.04  # 4cm padding - distractors spawn further from task objects
         FALLBACK_RADIUS = 0.06  # 6cm fallback if no bounding box available
 
         # Get task object positions for safety bubbles (and centroid calculation)
@@ -464,15 +517,18 @@ class DistractorWrapper:
                 y = max(grid_y_min + EDGE_MARGIN, min(y, grid_y_max - EDGE_MARGIN))
                 cell_idx = -1
 
-            # Spawn above surface (table or sink basin)
-            # Use higher spawn for sink task to clear the basin walls
-            # For sink: stagger heights to prevent mid-air collisions during falling
-            # For table: no stagger to avoid bouncing off table (10cm is sufficient)
+            # Spawn above surface using mesh-aware height
+            # RoboCasa meshes are NOT centered at origin - some have Z offsets of -30cm!
+            # Use Z bounds to ensure the BOTTOM of the mesh is above the surface
+            z_min, z_max = self.distractor_z_bounds[i]
+
             if is_sink_task:
+                # For sink: stagger heights to prevent mid-air collisions during falling
                 stagger_offset = i * 0.03  # 3cm higher for each subsequent object
-                z = surface_height + 0.15 + stagger_offset  # 15cm+ above sink basin
+                z = surface_height + 0.15 - z_min + stagger_offset  # 15cm+ clearance above sink basin
             else:
-                z = surface_height + 0.10  # 10cm above table (no stagger)
+                # For table: 2cm clearance above table surface
+                z = surface_height + 0.02 - z_min  # Bottom of mesh is 2cm above table
 
             # No rotation - use identity quaternion
             quat = [1, 0, 0, 0]
@@ -723,6 +779,7 @@ class DistractorWrapper:
         self._distractors_loaded = False
         self.distractor_objs = []
         self.distractor_radii = []
+        self.distractor_z_bounds = []
 
         obs, info = self.env.reset(**kwargs)
 

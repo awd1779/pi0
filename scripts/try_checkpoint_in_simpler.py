@@ -1,3 +1,4 @@
+import gc
 import os
 import random
 import time
@@ -20,31 +21,37 @@ def wrap_env_with_cgvd(env, args):
 
     from src.cgvd import CGVDWrapper
 
-    print(f"[CGVD] Wrapping environment with CGVD wrapper")
-    print(f"[CGVD]   blur_sigma={args.cgvd_blur_sigma}")
+    print(f"[CGVD] Wrapping environment with CGVD wrapper (LaMa inpainting)")
     print(f"[CGVD]   update_freq={args.cgvd_update_freq}")
     print(f"[CGVD]   presence_threshold={args.cgvd_presence_threshold}")
     print(f"[CGVD]   use_mock_segmenter={args.cgvd_use_mock}")
     if args.cgvd_distractor_names:
-        print(f"[CGVD]   distractor_names={args.cgvd_distractor_names} (distractor-only mode)")
+        print(f"[CGVD]   distractor_names={args.cgvd_distractor_names}")
     else:
-        print(f"[CGVD]   mode=foreground (blur background)")
+        print(f"[CGVD]   No distractors specified, CGVD will pass through unchanged")
 
-    # Use task-specific debug directory
-    debug_dir = os.path.join("cgvd_debug", args.task)
+    # Use output_dir for debug images if specified, otherwise fallback to cgvd_debug/{task}
+    if args.output_dir and args.output_dir != ".":
+        debug_dir = os.path.join(args.output_dir, "cgvd_debug")
+    else:
+        debug_dir = os.path.join("cgvd_debug", args.task)
 
     return CGVDWrapper(
         env,
         update_freq=args.cgvd_update_freq,
-        blur_sigma=args.cgvd_blur_sigma,
         presence_threshold=args.cgvd_presence_threshold,
         use_mock_segmenter=args.cgvd_use_mock,
-        feather_edges=args.cgvd_feather_edges,
         include_robot=True,  # Always include robot arm
         verbose=args.cgvd_verbose,
         save_debug_images=args.cgvd_save_debug,
         debug_dir=debug_dir,
         distractor_names=args.cgvd_distractor_names,
+        cache_distractor_once=True,
+        robot_presence_threshold=args.cgvd_robot_threshold,
+        distractor_presence_threshold=args.cgvd_distractor_threshold,
+        # Ablation flags
+        disable_safeset=getattr(args, 'cgvd_disable_safeset', False),
+        disable_inpaint=getattr(args, 'cgvd_disable_inpaint', False),
     )
 
 
@@ -59,11 +66,13 @@ def load_checkpoint(model, path):
 
 
 def run_episode(args, env, env_adapter, model, cfg, device, dtype, episode_idx):
-    """Run a single episode and return (success, steps, inference_times)."""
+    """Run a single episode and return (success, steps, inference_times, episode_time)."""
+    episode_start = time.time()
     env_adapter.reset()
 
     # Use different episode_id for each run to get variety
-    episode_id = (args.seed + episode_idx) % 21
+    # Bridge tasks have 24 episode variations (12 xy configs × 2 quat configs)
+    episode_id = (args.seed + episode_idx) % 24
     env_reset_options = {}
     env_reset_options["obj_init_options"] = {
         "episode_id": episode_id,  # this determines the obj inits in bridge
@@ -146,10 +155,11 @@ def run_episode(args, env, env_adapter, model, cfg, device, dtype, episode_idx):
                     print(f"Saved: {new_video_path}")
             break
 
+    episode_time = time.time() - episode_start
     result_str = "SUCCESS" if success else "FAILED"
-    print(f"Episode {episode_idx + 1}: {result_str} (steps={cnt_step})")
+    print(f"Episode {episode_idx + 1}: {result_str} (steps={cnt_step}, time={episode_time:.2f}s)")
 
-    return success, cnt_step, inference_times
+    return success, cnt_step, inference_times, episode_time
 
 
 def main(args):
@@ -218,14 +228,28 @@ def main(args):
     successes = []
     all_steps = []
     all_inference_times = []
+    all_episode_times = []
 
     for ep_idx in range(args.num_episodes):
-        success, steps, inference_times = run_episode(
+        success, steps, inference_times, episode_time = run_episode(
             args, env, env_adapter, model, cfg, device, dtype, ep_idx
         )
         successes.append(success)
         all_steps.append(steps)
         all_inference_times.extend(inference_times)
+        all_episode_times.append(episode_time)
+
+        # CUDA memory tracking
+        allocated_gb = torch.cuda.memory_allocated(args.gpu_id) / 1e9
+        reserved_gb = torch.cuda.memory_reserved(args.gpu_id) / 1e9
+        print(f"[Memory] Episode {ep_idx + 1}: allocated={allocated_gb:.2f}GB, reserved={reserved_gb:.2f}GB")
+
+        # Optional CUDA cache clearing
+        if args.clear_cuda_cache:
+            torch.cuda.empty_cache()
+            gc.collect()
+            if args.num_episodes > 1:  # Only print if multiple episodes
+                print(f"[Memory] Cleared CUDA cache")
 
     # summary
     num_success = sum(successes)
@@ -249,6 +273,14 @@ def main(args):
     if all_inference_times:
         print(f"Avg inference time: {np.mean(all_inference_times):.3f}s")
     print(f"Peak VRAM: {torch.cuda.max_memory_reserved(args.gpu_id) / 1024 ** 3:.2f} GB")
+    print("-" * 50)
+    print("TIMING PROFILE")
+    print(f"Episode times: {[f'{t:.1f}s' for t in all_episode_times]}")
+    print(f"Avg episode time: {np.mean(all_episode_times):.2f}s")
+    if len(all_episode_times) > 1:
+        time_drift = all_episode_times[-1] - all_episode_times[0]
+        drift_pct = (time_drift / all_episode_times[0]) * 100 if all_episode_times[0] > 0 else 0
+        print(f"Time drift (last - first): {time_drift:+.2f}s ({drift_pct:+.1f}%)")
     print("=" * 50 + "\n")
 
 
@@ -262,6 +294,7 @@ if __name__ == "__main__":
         default="google_robot_pick_horizontal_coke_can",
         choices=[
             "widowx_carrot_on_plate",
+            "widowx_banana_on_plate",
             "widowx_put_eggplant_in_basket",
             "widowx_spoon_on_towel",
             "widowx_stack_cube",
@@ -280,6 +313,11 @@ if __name__ == "__main__":
     parser.add_argument("--num_episodes", type=int, default=1, help="Number of episodes to run")
     parser.add_argument("--use_bf16", action="store_true")
     parser.add_argument("--use_torch_compile", action="store_true")
+    parser.add_argument(
+        "--clear_cuda_cache",
+        action="store_true",
+        help="Clear CUDA cache between episodes to prevent memory fragmentation"
+    )
     parser.add_argument("--recording", action="store_true")
     parser.add_argument("--output_dir", type=str, default=".", help="Directory to save output videos")
     parser.add_argument(
@@ -306,13 +344,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_cgvd",
         action="store_true",
-        help="Enable Concept-Gated Visual Distillation",
-    )
-    parser.add_argument(
-        "--cgvd_blur_sigma",
-        type=float,
-        default=15.0,
-        help="Gaussian blur sigma for CGVD background (default: 15.0)",
+        help="Enable Concept-Gated Visual Distillation (LaMa inpainting)",
     )
     parser.add_argument(
         "--cgvd_update_freq",
@@ -332,11 +364,6 @@ if __name__ == "__main__":
         help="Use mock segmenter for CGVD testing (no SAM3 required)",
     )
     parser.add_argument(
-        "--cgvd_feather_edges",
-        action="store_true",
-        help="Apply edge feathering to CGVD mask transitions",
-    )
-    parser.add_argument(
         "--cgvd_verbose",
         action="store_true",
         help="Print CGVD debug information",
@@ -351,24 +378,62 @@ if __name__ == "__main__":
         type=str,
         nargs="*",
         default=[],
-        help="Object names to blur as distractors (e.g., fork knife spatula). "
+        help="Object names to remove via inpainting (e.g., fork knife spatula). "
              "Auto-derived from --distractors if not specified. "
              "Override to use different names for SAM3 segmentation.",
     )
-
+    parser.add_argument(
+        "--cgvd_robot_threshold",
+        type=float,
+        default=0.05,
+        help="Threshold for robot arm detection (default 0.05, very permissive)",
+    )
+    parser.add_argument(
+        "--cgvd_distractor_threshold",
+        type=float,
+        default=0.3,
+        help="Threshold for distractor detection (default 0.3, stricter to avoid false positives)",
+    )
+    # Ablation flags for CGVD component studies
+    parser.add_argument(
+        "--cgvd_disable_safeset",
+        action="store_true",
+        help="Ablation: Disable safe-set protection (mask distractors without protecting target/anchor)",
+    )
+    parser.add_argument(
+        "--cgvd_disable_inpaint",
+        action="store_true",
+        help="Ablation: Disable LaMa inpainting (use mean-color fill instead)",
+    )
+    # Legacy flags (ignored, kept for backwards compatibility)
+    parser.add_argument("--cgvd_use_inpaint", action="store_true", help="(deprecated, inpainting always enabled)")
+    parser.add_argument("--cgvd_blur_sigma", type=float, default=15.0, help="(deprecated, unused)")
+    parser.add_argument("--cgvd_darken_strength", type=float, default=0.0, help="(deprecated, unused)")
+    parser.add_argument("--cgvd_feather_edges", action="store_true", help="(deprecated, unused)")
     args = parser.parse_args()
 
     # Auto-derive cgvd_distractor_names from distractors if not explicitly provided
     if args.distractors and args.use_cgvd and not args.cgvd_distractor_names:
-        # Extract object names from asset IDs like "rc_fork_11" -> "fork"
-        # Pattern: prefix_name_number (prefix=rc/ycb, name=object, number=variant)
+        # Extract object names from asset IDs
+        # Naming conventions:
+        #   YCB: ycb_<number>_<name> (e.g., "ycb_030_fork" -> "fork")
+        #   RC:  rc_<name>_<number>  (e.g., "rc_fork_11" -> "fork")
+        #   Scale suffix: object:scale (e.g., "ycb_030_fork:0.55")
         derived_names = []
         for asset_id in args.distractors:
-            parts = asset_id.split("_")
+            # Strip scale suffix (e.g., ":0.55")
+            asset_id_clean = asset_id.split(":")[0]
+            parts = asset_id_clean.split("_")
+
             if len(parts) >= 3:
-                # Remove prefix (rc/ycb) and suffix (number), join middle parts
-                # e.g., "rc_fork_11" -> "fork", "rc_measuring_spoon_17" -> "measuring spoon"
-                name = " ".join(parts[1:-1])
+                if parts[0] == "ycb":
+                    # YCB: ycb_<number>_<name> -> take last part(s)
+                    # e.g., "ycb_030_fork" -> "fork", "ycb_024_bowl" -> "bowl"
+                    name = " ".join(parts[2:])
+                else:
+                    # RC and others: prefix_<name>_<number> -> take middle parts
+                    # e.g., "rc_fork_11" -> "fork", "rc_measuring_spoon_17" -> "measuring spoon"
+                    name = " ".join(parts[1:-1])
                 if name and name not in derived_names:
                     derived_names.append(name)
             elif len(parts) == 2:

@@ -1,6 +1,7 @@
 """SAM 3 Segmenter for concept-driven visual grounding."""
 
 import os
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -23,7 +24,7 @@ class SAM3Segmenter:
         model_name: str = "facebook/sam3",
         device: Optional[str] = None,
         dtype: torch.dtype = torch.float16,
-        presence_threshold: float = 0.3,
+        presence_threshold: float = 0.5,
         mask_threshold: float = 0.5,
     ):
         """Initialize SAM3 segmenter.
@@ -91,6 +92,7 @@ class SAM3Segmenter:
         concept: str,
         vision_embeds=None,
         original_sizes=None,
+        presence_threshold: Optional[float] = None,
     ) -> Tuple[np.ndarray, float]:
         """Segment a single concept from an image.
 
@@ -99,11 +101,15 @@ class SAM3Segmenter:
             concept: Single concept string (e.g., "spoon")
             vision_embeds: Pre-computed vision embeddings (optional)
             original_sizes: Original image sizes from processor
+            presence_threshold: Override presence threshold (default: use instance threshold)
 
         Returns:
             Tuple of (mask, max_score) where mask is (H, W) float32
         """
         h, w = pil_image.size[1], pil_image.size[0]  # PIL is (W, H)
+
+        # Use provided threshold or fall back to instance default
+        threshold = presence_threshold if presence_threshold is not None else self.presence_threshold
 
         # If we have vision embeddings, use efficient multi-prompt inference
         if vision_embeds is not None:
@@ -132,7 +138,7 @@ class SAM3Segmenter:
         target_sizes = original_sizes.tolist() if original_sizes is not None else [[h, w]]
         results = self.processor.post_process_instance_segmentation(
             outputs,
-            threshold=self.presence_threshold,
+            threshold=threshold,
             mask_threshold=self.mask_threshold,
             target_sizes=target_sizes,
         )
@@ -145,7 +151,9 @@ class SAM3Segmenter:
             result = results[0]
             if "masks" in result and len(result["masks"]) > 0:
                 scores = result.get("scores", torch.ones(len(result["masks"])))
-                for i, mask_tensor in enumerate(result["masks"]):
+
+                for i in range(len(result["masks"])):
+                    mask_tensor = result["masks"][i]
                     mask = mask_tensor.cpu().numpy().astype(np.float32)
                     score = float(scores[i].cpu()) if isinstance(scores[i], torch.Tensor) else float(scores[i])
                     max_score = max(max_score, score)
@@ -163,6 +171,7 @@ class SAM3Segmenter:
         image: np.ndarray,
         concepts: str,
         return_individual_masks: bool = False,
+        presence_threshold: Optional[float] = None,
     ) -> np.ndarray:
         """Segment image based on text concepts.
 
@@ -170,6 +179,7 @@ class SAM3Segmenter:
             image: Input RGB image, shape (H, W, 3), dtype uint8
             concepts: Dot-separated concept string (e.g., "apple. basket. robot arm")
             return_individual_masks: If True, return dict of individual masks per concept
+            presence_threshold: Override presence threshold for this call (default: use instance threshold)
 
         Returns:
             Combined binary mask where 1 = any concept detected, 0 = background
@@ -180,6 +190,9 @@ class SAM3Segmenter:
             confidence scores (dict mapping concept -> score).
         """
         self._lazy_init()
+
+        # Use provided threshold or fall back to instance default
+        threshold = presence_threshold if presence_threshold is not None else self.presence_threshold
 
         h, w = image.shape[:2]
 
@@ -205,9 +218,9 @@ class SAM3Segmenter:
 
         for concept in concept_list:
             mask, score = self._segment_single_concept(
-                pil_image, concept, vision_embeds, original_sizes
+                pil_image, concept, vision_embeds, original_sizes, threshold,
             )
-            print(f"[SAM3] Concept '{concept}': score={score:.3f}, coverage={mask.sum() / mask.size * 100:.1f}%")
+            print(f"[SAM3] Concept '{concept}': score={score:.3f}, threshold={threshold:.2f}, coverage={mask.sum() / mask.size * 100:.1f}%")
 
             individual_masks[concept] = {"mask": mask, "score": score}
             self.last_scores[concept] = score
@@ -273,8 +286,16 @@ class MockSAM3Segmenter:
         image: np.ndarray,
         concepts: str,
         return_individual_masks: bool = False,
+        presence_threshold: Optional[float] = None,
     ) -> np.ndarray:
-        """Return a mock center-weighted mask."""
+        """Return a mock center-weighted mask.
+
+        Args:
+            image: Input RGB image
+            concepts: Dot-separated concept string
+            return_individual_masks: If True, return dict of individual masks
+            presence_threshold: Override presence threshold (ignored in mock)
+        """
         h, w = image.shape[:2]
 
         # Create center-weighted Gaussian mask
@@ -303,19 +324,146 @@ class MockSAM3Segmenter:
         return self.segment(image, concepts)
 
 
+class SAM3ClientSegmenter:
+    """SAM3 client that communicates with a separate SAM3 server process.
+
+    Use this when SAM3 cannot run in the same environment due to
+    transformers version conflicts (e.g., with GR00T which needs 4.53.0).
+
+    Start the server first:
+        python scripts/sam3_server.py
+    """
+
+    def __init__(
+        self,
+        presence_threshold: float = 0.5,
+        comm_dir: str = "/tmp/sam3_server",
+        timeout: float = 30.0,
+        **kwargs,
+    ):
+        self.presence_threshold = presence_threshold
+        self.comm_dir = Path(comm_dir)
+        self.timeout = timeout
+        self.last_scores = {}
+        self._check_server()
+
+    def _check_server(self):
+        """Check if SAM3 server is running."""
+        ready_file = self.comm_dir / "ready"
+        if not ready_file.exists():
+            raise RuntimeError(
+                "SAM3 server not running. Start it with:\n"
+                "  conda activate <env-with-transformers-5.0>\n"
+                "  python scripts/sam3_server.py &"
+            )
+        print("[SAM3 Client] Connected to SAM3 server")
+
+    def _parse_concepts(self, concepts: str) -> List[str]:
+        """Parse dot-separated concept string into list."""
+        parts = concepts.split(".")
+        return [p.strip() for p in parts if p.strip()]
+
+    def segment(
+        self,
+        image: np.ndarray,
+        concepts: str,
+        presence_threshold: Optional[float] = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """Segment image by sending request to SAM3 server."""
+        import json
+        import tempfile
+        import time
+
+        threshold = presence_threshold if presence_threshold is not None else self.presence_threshold
+        concept_list = self._parse_concepts(concepts)
+
+        if verbose:
+            print(f"[SAM3 Client] Requesting segmentation: {concept_list}")
+
+        # Save image to temp file
+        pil_image = Image.fromarray(image) if isinstance(image, np.ndarray) else image
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+            image_path = f.name
+            pil_image.save(image_path)
+
+        try:
+            # Write request
+            request_file = self.comm_dir / "request.json"
+            response_file = self.comm_dir / "response.npz"
+
+            # Remove old response
+            if response_file.exists():
+                response_file.unlink()
+
+            # Send request
+            request = {
+                'image_path': image_path,
+                'concepts': concept_list,
+                'threshold': threshold,
+            }
+            with open(request_file, 'w') as f:
+                json.dump(request, f)
+
+            # Wait for response
+            start_time = time.time()
+            while not response_file.exists():
+                if time.time() - start_time > self.timeout:
+                    raise TimeoutError(f"SAM3 server timeout after {self.timeout}s")
+                time.sleep(0.01)
+
+            # Wait a bit for file to be fully written, then load with retries
+            time.sleep(0.1)
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    data = np.load(response_file)
+                    mask = data['mask']
+                    break
+                except EOFError:
+                    if attempt < max_retries - 1:
+                        time.sleep(0.1)
+                    else:
+                        raise
+
+            if 'error' in data.files and 'error' in data:
+                print(f"[SAM3 Client] Server error: {data['error']}")
+
+            if verbose:
+                print(f"[SAM3 Client] Mask coverage: {mask.sum() / mask.size * 100:.1f}%")
+
+            return mask
+
+        finally:
+            # Cleanup temp file
+            os.unlink(image_path)
+
+    def segment_with_robot(
+        self,
+        image: np.ndarray,
+        concepts: str,
+        fallback_to_full: bool = True,
+    ) -> np.ndarray:
+        return self.segment(image, concepts)
+
+
 def create_segmenter(
     use_mock: bool = False,
+    use_server: bool = False,
     **kwargs,
 ) -> SAM3Segmenter:
     """Factory function to create appropriate segmenter.
 
     Args:
         use_mock: If True, return mock segmenter for testing
+        use_server: If True, use SAM3 client to connect to server
         **kwargs: Arguments passed to segmenter constructor
 
     Returns:
-        SAM3Segmenter or MockSAM3Segmenter instance
+        SAM3Segmenter, SAM3ClientSegmenter, or MockSAM3Segmenter instance
     """
     if use_mock:
         return MockSAM3Segmenter(**kwargs)
+    if use_server:
+        return SAM3ClientSegmenter(**kwargs)
     return SAM3Segmenter(**kwargs)
