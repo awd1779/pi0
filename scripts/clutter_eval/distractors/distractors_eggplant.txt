@@ -1,0 +1,12 @@
+# Distractor objects for eggplant task (widowx_put_eggplant_in_basket)
+# Target: eggplant | Distractors: elongated vegetables/fruits
+# Format: object_id:scale (scale is optional, defaults to 1.0)
+
+
+ycb_011_banana:0.5
+ycb_014_lemon:0.5
+ycb_012_strawberry:0.5
+ycb_013_apple:0.5
+ycb_016_pear:0.5
+ycb_018_plum:0.5
+

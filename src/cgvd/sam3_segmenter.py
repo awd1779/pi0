@@ -1,6 +1,7 @@
 """SAM 3 Segmenter for concept-driven visual grounding."""
 
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -25,7 +26,7 @@ class SAM3Segmenter:
         device: Optional[str] = None,
         dtype: torch.dtype = torch.float16,
         presence_threshold: float = 0.5,
-        mask_threshold: float = 0.5,
+        mask_threshold: float = 0.3,
     ):
         """Initialize SAM3 segmenter.
 
@@ -48,6 +49,9 @@ class SAM3Segmenter:
         self._vision_embeds_cache = None
         self.last_scores = {}  # Stores per-concept scores from last segment() call
 
+        # Timing instrumentation
+        self.last_segment_time: float = 0.0
+
     def _lazy_init(self):
         """Lazily initialize model and processor on first use."""
         if self._initialized:
@@ -64,10 +68,24 @@ class SAM3Segmenter:
         # Get HuggingFace token for gated model access
         hf_token = os.environ.get("HF_TOKEN")
 
-        self.processor = Sam3Processor.from_pretrained(self.model_name, token=hf_token)
-        self.model = Sam3Model.from_pretrained(
-            self.model_name, torch_dtype=self.dtype, token=hf_token
-        )
+        # Try local cache first to avoid network timeouts when model is
+        # already downloaded.  Fall back to network download if needed.
+        try:
+            self.processor = Sam3Processor.from_pretrained(
+                self.model_name, token=hf_token, local_files_only=True,
+            )
+            self.model = Sam3Model.from_pretrained(
+                self.model_name, torch_dtype=self.dtype, token=hf_token,
+                local_files_only=True,
+            )
+        except OSError:
+            print("[SAM3] Model not in local cache, downloading from HuggingFace Hub...")
+            self.processor = Sam3Processor.from_pretrained(
+                self.model_name, token=hf_token,
+            )
+            self.model = Sam3Model.from_pretrained(
+                self.model_name, torch_dtype=self.dtype, token=hf_token,
+            )
         self.model.to(self.device)
         self.model.eval()
         self._initialized = True
@@ -143,9 +161,10 @@ class SAM3Segmenter:
             target_sizes=target_sizes,
         )
 
-        # Combine masks for this concept
+        # Collect per-instance masks
         combined_mask = np.zeros((h, w), dtype=np.float32)
         max_score = 0.0
+        instance_masks = []  # List of (mask, score) for each instance
 
         if results and len(results) > 0:
             result = results[0]
@@ -163,8 +182,9 @@ class SAM3Segmenter:
                         import cv2
                         mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
                     combined_mask = np.maximum(combined_mask, mask)
+                    instance_masks.append((mask.copy(), score))
 
-        return combined_mask, max_score
+        return combined_mask, max_score, instance_masks
 
     def segment(
         self,
@@ -189,6 +209,8 @@ class SAM3Segmenter:
             After calling segment(), you can access self.last_scores for per-concept
             confidence scores (dict mapping concept -> score).
         """
+        start_time = time.time()
+
         self._lazy_init()
 
         # Use provided threshold or fall back to instance default
@@ -215,20 +237,37 @@ class SAM3Segmenter:
         combined_mask = np.zeros((h, w), dtype=np.float32)
         individual_masks = {}
         self.last_scores = {}  # Store scores for external access
+        self.last_individual_masks = {}  # Store individual masks for debug visualization
 
         for concept in concept_list:
-            mask, score = self._segment_single_concept(
+            mask, score, instance_masks = self._segment_single_concept(
                 pil_image, concept, vision_embeds, original_sizes, threshold,
             )
-            print(f"[SAM3] Concept '{concept}': score={score:.3f}, threshold={threshold:.2f}, coverage={mask.sum() / mask.size * 100:.1f}%")
+            print(f"[SAM3] Concept '{concept}': score={score:.3f}, threshold={threshold:.2f}, coverage={mask.sum() / mask.size * 100:.1f}%, instances={len(instance_masks)}")
 
             individual_masks[concept] = {"mask": mask, "score": score}
-            self.last_scores[concept] = score
+            # Store per-instance masks and scores for debug visualization
+            # Use consistent keys between masks and scores
+            if len(instance_masks) == 0:
+                # No detections - store empty with base name
+                self.last_scores[concept] = score
+                self.last_individual_masks[concept] = np.zeros_like(combined_mask)
+            elif len(instance_masks) == 1:
+                # Single instance - use base name
+                self.last_scores[concept] = instance_masks[0][1]
+                self.last_individual_masks[concept] = instance_masks[0][0]
+            else:
+                # Multiple instances - use indexed names only (no base name)
+                for i, (inst_mask, inst_score) in enumerate(instance_masks):
+                    self.last_individual_masks[f"{concept}_{i}"] = inst_mask
+                    self.last_scores[f"{concept}_{i}"] = inst_score
             combined_mask = np.maximum(combined_mask, mask)
 
         # Binarize
         combined_mask = (combined_mask > 0.5).astype(np.float32)
         print(f"[SAM3] Combined mask coverage: {combined_mask.sum() / combined_mask.size * 100:.1f}%")
+
+        self.last_segment_time = time.time() - start_time
 
         if return_individual_masks:
             return combined_mask, individual_masks
@@ -280,6 +319,7 @@ class MockSAM3Segmenter:
     def __init__(self, presence_threshold: float = 0.4, **kwargs):
         self.presence_threshold = presence_threshold
         self.last_scores = {}  # Mock scores
+        self.last_segment_time: float = 0.0  # Timing instrumentation
 
     def segment(
         self,
@@ -296,6 +336,8 @@ class MockSAM3Segmenter:
             return_individual_masks: If True, return dict of individual masks
             presence_threshold: Override presence threshold (ignored in mock)
         """
+        start_time = time.time()
+
         h, w = image.shape[:2]
 
         # Create center-weighted Gaussian mask
@@ -310,6 +352,8 @@ class MockSAM3Segmenter:
         # Mock scores for each concept
         concept_list = [c.strip() for c in concepts.split(".") if c.strip()]
         self.last_scores = {c: 0.85 for c in concept_list}  # Mock high confidence
+
+        self.last_segment_time = time.time() - start_time
 
         if return_individual_masks:
             return mask, {}
@@ -345,6 +389,7 @@ class SAM3ClientSegmenter:
         self.comm_dir = Path(comm_dir)
         self.timeout = timeout
         self.last_scores = {}
+        self.last_segment_time: float = 0.0  # Timing instrumentation
         self._check_server()
 
     def _check_server(self):
@@ -373,7 +418,8 @@ class SAM3ClientSegmenter:
         """Segment image by sending request to SAM3 server."""
         import json
         import tempfile
-        import time
+
+        start_time = time.time()
 
         threshold = presence_threshold if presence_threshold is not None else self.presence_threshold
         concept_list = self._parse_concepts(concepts)
@@ -406,9 +452,9 @@ class SAM3ClientSegmenter:
                 json.dump(request, f)
 
             # Wait for response
-            start_time = time.time()
+            wait_start = time.time()
             while not response_file.exists():
-                if time.time() - start_time > self.timeout:
+                if time.time() - wait_start > self.timeout:
                     raise TimeoutError(f"SAM3 server timeout after {self.timeout}s")
                 time.sleep(0.01)
 
@@ -432,6 +478,8 @@ class SAM3ClientSegmenter:
             if verbose:
                 print(f"[SAM3 Client] Mask coverage: {mask.sum() / mask.size * 100:.1f}%")
 
+            self.last_segment_time = time.time() - start_time
+
             return mask
 
         finally:
@@ -447,12 +495,72 @@ class SAM3ClientSegmenter:
         return self.segment(image, concepts)
 
 
+# Module-level singleton instances for sharing across CGVDWrapper instances
+_sam3_singleton: Optional[SAM3Segmenter] = None
+_sam3_client_singleton: Optional[SAM3ClientSegmenter] = None
+_mock_singleton: Optional[MockSAM3Segmenter] = None
+
+
+def get_sam3_segmenter(
+    use_mock: bool = False,
+    use_server: bool = False,
+    **kwargs,
+) -> SAM3Segmenter:
+    """Get or create a singleton SAM3 segmenter.
+
+    This function returns a shared instance to avoid redundant model loading
+    when multiple CGVDWrapper instances are created (e.g., in batch evaluation).
+
+    The singleton is selected based on use_mock and use_server flags:
+    - use_mock=True: Returns shared MockSAM3Segmenter
+    - use_server=True: Returns shared SAM3ClientSegmenter
+    - Otherwise: Returns shared SAM3Segmenter
+
+    Args:
+        use_mock: If True, return mock segmenter for testing
+        use_server: If True, use SAM3 client to connect to server
+        **kwargs: Arguments passed to segmenter constructor (only used on first call)
+
+    Returns:
+        Shared SAM3Segmenter, SAM3ClientSegmenter, or MockSAM3Segmenter instance
+    """
+    global _sam3_singleton, _sam3_client_singleton, _mock_singleton
+
+    if use_mock:
+        if _mock_singleton is None:
+            _mock_singleton = MockSAM3Segmenter(**kwargs)
+            print("[SAM3] Created singleton MockSAM3Segmenter")
+        return _mock_singleton
+
+    if use_server:
+        if _sam3_client_singleton is None:
+            _sam3_client_singleton = SAM3ClientSegmenter(**kwargs)
+            print("[SAM3] Created singleton SAM3ClientSegmenter")
+        return _sam3_client_singleton
+
+    if _sam3_singleton is None:
+        _sam3_singleton = SAM3Segmenter(**kwargs)
+        print("[SAM3] Created singleton SAM3Segmenter")
+    return _sam3_singleton
+
+
+def clear_sam3_singleton():
+    """Clear the singleton instances (useful for testing or memory cleanup)."""
+    global _sam3_singleton, _sam3_client_singleton, _mock_singleton
+    _sam3_singleton = None
+    _sam3_client_singleton = None
+    _mock_singleton = None
+
+
 def create_segmenter(
     use_mock: bool = False,
     use_server: bool = False,
     **kwargs,
 ) -> SAM3Segmenter:
     """Factory function to create appropriate segmenter.
+
+    Note: This creates a NEW instance each time. For shared instances
+    that persist across CGVDWrapper instances, use get_sam3_segmenter() instead.
 
     Args:
         use_mock: If True, return mock segmenter for testing

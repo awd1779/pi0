@@ -1,6 +1,41 @@
 """LaMa-based inpainting for CGVD distractor removal."""
 
+import time
+from typing import Optional
+
 import numpy as np
+
+
+# Module-level singleton for sharing across CGVDWrapper instances
+_lama_singleton: Optional["LamaInpainter"] = None
+
+
+def get_lama_inpainter(device: str = "cuda") -> "LamaInpainter":
+    """Get or create a singleton LaMa inpainter.
+
+    This function returns a shared instance to avoid redundant model loading
+    when multiple CGVDWrapper instances are created (e.g., in batch evaluation).
+
+    Args:
+        device: Device to run on ("cuda" or "cpu"), only used on first call
+
+    Returns:
+        Shared LamaInpainter instance
+    """
+    global _lama_singleton
+
+    if _lama_singleton is None:
+        _lama_singleton = LamaInpainter(device=device)
+        # Force lazy initialization to load the model now
+        _lama_singleton._load_model()
+        print("[LaMa] Created singleton LamaInpainter")
+    return _lama_singleton
+
+
+def clear_lama_singleton():
+    """Clear the singleton instance (useful for testing or memory cleanup)."""
+    global _lama_singleton
+    _lama_singleton = None
 
 
 class LamaInpainter:
@@ -15,6 +50,9 @@ class LamaInpainter:
         self.device = device
         self._model = None
 
+        # Timing instrumentation
+        self.last_inpaint_time: float = 0.0
+
     def _load_model(self):
         """Lazy load LaMa model on first use."""
         if self._model is None:
@@ -26,18 +64,20 @@ class LamaInpainter:
         self,
         image: np.ndarray,
         mask: np.ndarray,
-        dilate_mask: int = 3,
+        dilate_mask: int = 11,
     ) -> np.ndarray:
         """Remove masked regions via inpainting.
 
         Args:
             image: RGB image [H, W, 3] uint8
             mask: Binary mask where 1 = inpaint (remove), 0 = keep
-            dilate_mask: Pixels to dilate mask (helps clean edges)
+            dilate_mask: Pixels to dilate mask (helps cover shadows/edges)
 
         Returns:
             Inpainted image [H, W, 3] uint8
         """
+        start_time = time.time()
+
         self._load_model()
 
         # Convert mask to uint8 (LaMa expects 0-255)
@@ -52,5 +92,7 @@ class LamaInpainter:
 
         # Run LaMa inpainting
         result = self._model(image, mask_uint8)
+
+        self.last_inpaint_time = time.time() - start_time
 
         return np.array(result)

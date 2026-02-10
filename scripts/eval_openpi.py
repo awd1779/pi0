@@ -1,17 +1,47 @@
+"""
+OpenPI Pi0 Evaluation Script for SimplerEnv.
+
+This script evaluates OpenPI Pi0 models on SimplerEnv tasks. It should be run in the
+'openpi' conda environment which has OpenPI installed.
+
+The pi0_base model is trained on 10k+ hours of diverse robot data including Bridge/OXE,
+making it useful for testing CGVD effectiveness on a pre-trained cross-embodiment model.
+
+Usage:
+    conda activate openpi
+    python scripts/eval_openpi.py \
+        --task widowx_carrot_on_plate \
+        --model pi0_widowx \
+        --num_episodes 10 \
+        --use_cgvd
+
+Environment Setup:
+    conda create -n openpi python=3.11 -y
+    conda activate openpi
+    cd /home/ubuntu && git clone --recurse-submodules https://github.com/Physical-Intelligence/openpi.git
+    cd openpi
+    GIT_LFS_SKIP_SMUDGE=1 uv sync
+    GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+    pip install -e /home/ubuntu/allenzren_SimplerEnv
+    pip install -e /home/ubuntu/allenzren_SimplerEnv/ManiSkill2_real2sim
+    pip install -e /home/ubuntu/open-pi-zero
+"""
+
 import gc
 import os
 import random
 import time
 
-import hydra
 import imageio
 import numpy as np
 import simpler_env
 import torch
-from omegaconf import OmegaConf
 
-from src.model.vla.pizero import PiZeroInference
-from src.utils.monitor import log_allocated_gpu_memory, log_execution_time
+from src.model.vla.openpi import OpenPIInference
+from src.agent.env_adapter.openpi_simpler import (
+    OpenPIBridgeSimplerAdapter,
+    OpenPIFractalSimplerAdapter,
+)
 
 
 def wrap_env_with_cgvd(env, args):
@@ -29,8 +59,12 @@ def wrap_env_with_cgvd(env, args):
         print(f"[CGVD]   distractor_names={args.cgvd_distractor_names}")
     else:
         print(f"[CGVD]   No distractors specified, CGVD will pass through unchanged")
+    if getattr(args, 'cgvd_disable_safeset', False):
+        print(f"[CGVD]   ABLATION: Safe-set protection DISABLED")
+    if getattr(args, 'cgvd_disable_inpaint', False):
+        print(f"[CGVD]   ABLATION: Inpainting DISABLED (mean-color fill)")
 
-    # Use output_dir for debug images if specified, otherwise fallback to cgvd_debug/{task}
+    # Use output_dir for debug images if specified
     if args.output_dir and args.output_dir != ".":
         debug_dir = os.path.join(args.output_dir, "cgvd_debug")
     else:
@@ -41,7 +75,7 @@ def wrap_env_with_cgvd(env, args):
         update_freq=args.cgvd_update_freq,
         presence_threshold=args.cgvd_presence_threshold,
         use_mock_segmenter=args.cgvd_use_mock,
-        include_robot=True,  # Always include robot arm
+        include_robot=True,
         verbose=args.cgvd_verbose,
         save_debug_images=args.cgvd_save_debug,
         debug_dir=debug_dir,
@@ -49,41 +83,46 @@ def wrap_env_with_cgvd(env, args):
         cache_distractor_once=True,
         robot_presence_threshold=args.cgvd_robot_threshold,
         distractor_presence_threshold=args.cgvd_distractor_threshold,
-        # Compositing parameters
-        blend_sigma=getattr(args, 'cgvd_blend_sigma', 3.0),
-        lama_dilation=getattr(args, 'cgvd_lama_dilation', 11),
-        safe_dilation=getattr(args, 'cgvd_safe_dilation', 5),
-        cache_refresh_interval=getattr(args, 'cgvd_cache_refresh', 0),
-        safeset_warmup_frames=getattr(args, 'cgvd_safeset_warmup', 5),
-        # Distractor IoU suppression
-        distractor_iou_threshold=getattr(args, 'cgvd_distractor_iou_threshold', 0.15),
         # Ablation flags
         disable_safeset=getattr(args, 'cgvd_disable_safeset', False),
         disable_inpaint=getattr(args, 'cgvd_disable_inpaint', False),
     )
 
 
-@log_execution_time()
-def load_checkpoint(model, path):
-    """load to cpu first, then move to gpu"""
-    data = torch.load(path, weights_only=True, map_location="cpu")
-    # remove "_orig_mod." prefix if saved model was compiled
-    data["model"] = {k.replace("_orig_mod.", ""): v for k, v in data["model"].items()}
-    model.load_state_dict(data["model"], strict=True)
-    print(f"Loaded model from {path}")
+def get_embodiment_from_task(task: str) -> str:
+    """Determine embodiment type from task name."""
+    if task.startswith("widowx"):
+        return "bridge"
+    elif task.startswith("google_robot"):
+        return "fractal"
+    else:
+        raise ValueError(f"Unknown task type: {task}")
 
 
-def run_episode(args, env, env_adapter, model, cfg, device, dtype, episode_idx):
+def create_env_adapter(embodiment: str, args):
+    """Create the appropriate environment adapter."""
+    if embodiment == "bridge":
+        return OpenPIBridgeSimplerAdapter(
+            image_size=(224, 224),
+        )
+    elif embodiment == "fractal":
+        return OpenPIFractalSimplerAdapter(
+            image_size=(224, 224),
+        )
+    else:
+        raise ValueError(f"Unknown embodiment: {embodiment}")
+
+
+def run_episode(args, env, env_adapter, model, episode_idx, act_steps=4):
     """Run a single episode and return (success, steps, inference_times, episode_time)."""
     episode_start = time.time()
     env_adapter.reset()
+    model.reset()
 
     # Use different episode_id for each run to get variety
-    # Bridge tasks have 24 episode variations (12 xy configs × 2 quat configs)
-    episode_id = (args.seed + episode_idx) % 24
-    env_reset_options = {}
-    env_reset_options["obj_init_options"] = {
-        "episode_id": episode_id,  # this determines the obj inits in bridge
+    episode_id = (args.seed + episode_idx) % 21
+    env_reset_options = {
+        "obj_init_options": {"episode_id": episode_id},
     }
     obs, reset_info = env.reset(options=env_reset_options)
     instruction = env.unwrapped.get_language_instruction()
@@ -91,12 +130,10 @@ def run_episode(args, env, env_adapter, model, cfg, device, dtype, episode_idx):
     video_writer = None
     video_path = None
     if args.recording:
-        os.environ["TOKENIZERS_PARALLELISM"] = (
-            "false"  # avoid tokenizer forking warning about deadlock
-        )
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
         os.makedirs(args.output_dir, exist_ok=True)
         suffix = "_cgvd" if args.use_cgvd else "_baseline"
-        video_path = os.path.join(args.output_dir, f"try_{args.task}{suffix}_ep{episode_idx}.mp4")
+        video_path = os.path.join(args.output_dir, f"openpi_{args.task}{suffix}_ep{episode_idx}.mp4")
         video_writer = imageio.get_writer(video_path)
 
     print(f"\n--- Episode {episode_idx + 1}/{args.num_episodes} (id={episode_id}) ---")
@@ -107,55 +144,49 @@ def run_episode(args, env, env_adapter, model, cfg, device, dtype, episode_idx):
     success = False
 
     while True:
-        # infer action chunk
+        # Preprocess observation
         inputs = env_adapter.preprocess(env, obs, instruction)
-        causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
-            model.build_causal_mask_and_position_ids(
-                inputs["attention_mask"], dtype=dtype
-            )
-        )
-        image_text_proprio_mask, action_mask = model.split_full_mask_into_submasks(
-            causal_mask
-        )
-        inputs = {
-            "input_ids": inputs["input_ids"],
-            "pixel_values": inputs["pixel_values"].to(dtype),
-            "image_text_proprio_mask": image_text_proprio_mask,
-            "action_mask": action_mask,
-            "vlm_position_ids": vlm_position_ids,
-            "proprio_position_ids": proprio_position_ids,
-            "action_position_ids": action_position_ids,
-            "proprios": inputs["proprios"].to(dtype),
-        }
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        # Run OpenPI inference
         start_inference_time = time.time()
-        with torch.inference_mode():  # speeds up
-            actions = model(**inputs)
+        actions = model.forward(
+            image=inputs["image"],
+            state=inputs["state"],
+            instruction=inputs["instruction"],
+        )
         if cnt_step > 0:
             inference_times.append(time.time() - start_inference_time)
-        env_actions = env_adapter.postprocess(actions[0].float().cpu().numpy())
 
-        # environment step
-        for env_action in env_actions[: cfg.act_steps]:
+        # Debug logging for action analysis
+        if cnt_step == 0:
+            print(f"[DEBUG] Input state: {inputs['state']}")
+            print(f"[DEBUG] Raw actions shape: {actions.shape}")
+            print(f"[DEBUG] Actions[0]: {actions[0]}")
+            print(f"[DEBUG] Action range: [{actions.min():.4f}, {actions.max():.4f}]")
+
+        # Postprocess actions
+        env_actions = env_adapter.postprocess(actions)
+
+        # Execute action steps
+        for env_action in env_actions[:act_steps]:
             obs, reward, success, truncated, info = env.step(env_action)
             cnt_step += 1
             if truncated:
                 break
 
-        # save frame
+        # Save frame for video
         if video_writer is not None:
             video_writer.append_data(env_adapter.get_video_frame(env, obs))
 
-        # update instruction in long horizon tasks, e.g., pick apple ---> put in top drawer
+        # Update instruction if changed (long-horizon tasks)
         new_instruction = env.unwrapped.get_language_instruction()
         if new_instruction != instruction:
             instruction = new_instruction
 
-        # original octo eval only done when timeout, i.e., not upon success
+        # Check termination
         if truncated:
             if video_writer is not None:
                 video_writer.close()
-                # Rename video to include success/failure status
                 if video_path:
                     result_suffix = "SUCCESS" if success else "FAILED"
                     new_video_path = video_path.replace(".mp4", f"_{result_suffix}.mp4")
@@ -171,44 +202,28 @@ def run_episode(args, env, env_adapter, model, cfg, device, dtype, episode_idx):
 
 
 def main(args):
-    # seeding
+    # Seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    # devices
-    device = torch.device(f"cuda:{args.gpu_id}")
+    # Determine embodiment from task
+    embodiment = get_embodiment_from_task(args.task)
+    print(f"[OpenPI] Task: {args.task}")
+    print(f"[OpenPI] Model: {args.model}")
+    print(f"[OpenPI] Embodiment: {embodiment}")
 
-    # load default configs
-    if "fractal" in args.checkpoint_path:
-        cfg = OmegaConf.load(
-            "config/eval/fractal_apple.yaml"
-        )  # doesn't matter which task
-    if "bridge" in args.checkpoint_path:
-        cfg = OmegaConf.load("config/eval/bridge.yaml")
+    # Device setup
+    device = f"cuda:{args.gpu_id}"
+    print(f"[OpenPI] Using device: {device}")
 
-    # model
-    dtype = torch.bfloat16 if args.use_bf16 else torch.float32
-    model = PiZeroInference(cfg, use_ddp=False)
-    load_checkpoint(model, args.checkpoint_path)
-    model.freeze_all_weights()
-    model.to(dtype)
-    model.to(device)
-    if (
-        args.use_torch_compile
-    ):  # model being compiled in the first batch which takes some time
-        model = torch.compile(
-            model,
-            mode="default",  # "reduce-overhead; max-autotune(-no-cudagraphs)
-            # backend="inductor", # default: inductor; cudagraphs
-        )
-    # modes: https://pytorch.org/docs/main/generated/torch.compile.html
-    # backends: https://pytorch.org/docs/stable/torch.compiler.html
-    model.eval()
-    print(f"Using cuda device: {device} dtype: {dtype}")
-    log_allocated_gpu_memory(None, "loading model", args.gpu_id)
+    # Load OpenPI model
+    model = OpenPIInference(
+        model_name=args.model,
+        device=device,
+    )
 
-    # simpler env
+    # Create SimplerEnv
     env = simpler_env.make(args.task)
 
     # Add distractors if specified
@@ -228,13 +243,13 @@ def main(args):
             scale_info = f"rc_*/ycb_*={ext_scale}, others=1.0"
         print(f"[Distractors] Added: {args.distractors} ({scale_info})")
 
-    # optionally wrap with CGVD (after distractors so it sees the cluttered scene)
+    # Optionally wrap with CGVD
     env = wrap_env_with_cgvd(env, args)
 
-    # env specifics
-    env_adapter = hydra.utils.instantiate(cfg.env.adapter)
+    # Create environment adapter
+    env_adapter = create_env_adapter(embodiment, args)
 
-    # run episodes
+    # Run episodes
     successes = []
     all_steps = []
     all_inference_times = []
@@ -242,7 +257,7 @@ def main(args):
 
     for ep_idx in range(args.num_episodes):
         success, steps, inference_times, episode_time = run_episode(
-            args, env, env_adapter, model, cfg, device, dtype, ep_idx
+            args, env, env_adapter, model, ep_idx, act_steps=args.act_steps
         )
         successes.append(success)
         all_steps.append(steps)
@@ -250,26 +265,28 @@ def main(args):
         all_episode_times.append(episode_time)
 
         # CUDA memory tracking
-        allocated_gb = torch.cuda.memory_allocated(args.gpu_id) / 1e9
-        reserved_gb = torch.cuda.memory_reserved(args.gpu_id) / 1e9
-        print(f"[Memory] Episode {ep_idx + 1}: allocated={allocated_gb:.2f}GB, reserved={reserved_gb:.2f}GB")
+        if torch.cuda.is_available():
+            allocated_gb = torch.cuda.memory_allocated(args.gpu_id) / 1e9
+            reserved_gb = torch.cuda.memory_reserved(args.gpu_id) / 1e9
+            print(f"[Memory] Episode {ep_idx + 1}: allocated={allocated_gb:.2f}GB, reserved={reserved_gb:.2f}GB")
 
         # Optional CUDA cache clearing
-        if args.clear_cuda_cache:
+        if args.clear_cuda_cache and torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
-            if args.num_episodes > 1:  # Only print if multiple episodes
+            if args.num_episodes > 1:
                 print(f"[Memory] Cleared CUDA cache")
 
-    # summary
+    # Print summary
     num_success = sum(successes)
     success_rate = num_success / args.num_episodes * 100
 
     print("\n\n" + "=" * 50)
-    print("EVALUATION SUMMARY")
+    print("EVALUATION SUMMARY (OpenPI)")
     print("=" * 50)
-    print(f"Checkpoint: {args.checkpoint_path}")
+    print(f"Model: {args.model}")
     print(f"Task: {args.task}")
+    print(f"Embodiment: {embodiment}")
     print(f"CGVD: {'enabled' if args.use_cgvd else 'disabled'}")
     if args.use_cgvd:
         print(f"  blur_sigma={args.cgvd_blur_sigma}")
@@ -282,7 +299,8 @@ def main(args):
     print(f"Avg steps per episode: {np.mean(all_steps):.1f}")
     if all_inference_times:
         print(f"Avg inference time: {np.mean(all_inference_times):.3f}s")
-    print(f"Peak VRAM: {torch.cuda.max_memory_reserved(args.gpu_id) / 1024 ** 3:.2f} GB")
+    if torch.cuda.is_available():
+        print(f"Peak VRAM: {torch.cuda.max_memory_reserved(args.gpu_id) / 1024 ** 3:.2f} GB")
     print("-" * 50)
     print("TIMING PROFILE")
     print(f"Episode times: {[f'{t:.1f}s' for t in all_episode_times]}")
@@ -297,17 +315,18 @@ def main(args):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="OpenPI evaluation on SimplerEnv")
     parser.add_argument(
         "--task",
         type=str,
-        default="google_robot_pick_horizontal_coke_can",
+        default="widowx_carrot_on_plate",
         choices=[
+            # Bridge/WidowX tasks
             "widowx_carrot_on_plate",
-            "widowx_banana_on_plate",
             "widowx_put_eggplant_in_basket",
             "widowx_spoon_on_towel",
             "widowx_stack_cube",
+            # Fractal/Google Robot tasks
             "google_robot_pick_horizontal_coke_can",
             "google_robot_pick_vertical_coke_can",
             "google_robot_pick_standing_coke_can",
@@ -317,37 +336,44 @@ if __name__ == "__main__":
             "google_robot_place_apple_in_closed_top_drawer",
         ],
     )
-    parser.add_argument("--checkpoint_path", type=str)
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="pi0_widowx",
+        choices=["pi0_widowx", "pi0_fractal", "pi0_fast_droid", "pi05_droid", "pi0_fast_libero", "pi05_libero", "pi0_aloha"],
+        help="OpenPI model name. pi0_widowx for Bridge tasks, pi0_fractal for Google Robot tasks.",
+    )
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num_episodes", type=int, default=1, help="Number of episodes to run")
-    parser.add_argument("--use_bf16", action="store_true")
-    parser.add_argument("--use_torch_compile", action="store_true")
+    parser.add_argument("--num_episodes", type=int, default=1)
+    parser.add_argument("--act_steps", type=int, default=4, help="Number of action steps to execute per inference")
     parser.add_argument(
         "--clear_cuda_cache",
         action="store_true",
-        help="Clear CUDA cache between episodes to prevent memory fragmentation"
+        help="Clear CUDA cache between episodes",
     )
     parser.add_argument("--recording", action="store_true")
     parser.add_argument("--output_dir", type=str, default=".", help="Directory to save output videos")
+
+    # Distractor arguments
     parser.add_argument(
         "--distractors",
         type=str,
         nargs="*",
         default=[],
-        help="Distractor object IDs to add (e.g., apple orange sponge)"
+        help="Distractor object IDs to add (e.g., apple orange sponge)",
     )
     parser.add_argument(
         "--distractor_scale",
         type=float,
         default=None,
-        help="Scale multiplier for ALL distractor objects (overrides everything)"
+        help="Scale multiplier for ALL distractor objects",
     )
     parser.add_argument(
         "--external_asset_scale",
         type=float,
         default=None,
-        help="Scale multiplier for rc_* and ycb_* objects only (default: 0.1 = 10%%). Built-in objects unaffected."
+        help="Scale multiplier for rc_* and ycb_* objects only (default: 0.1)",
     )
     parser.add_argument(
         "--num_distractors",
@@ -365,7 +391,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_cgvd",
         action="store_true",
-        help="Enable Concept-Gated Visual Distillation (LaMa inpainting)",
+        help="Enable Concept-Gated Visual Distillation",
+    )
+    parser.add_argument(
+        "--cgvd_blur_sigma",
+        type=float,
+        default=15.0,
+        help="Gaussian blur sigma for CGVD background (default: 15.0)",
     )
     parser.add_argument(
         "--cgvd_update_freq",
@@ -382,7 +414,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cgvd_use_mock",
         action="store_true",
-        help="Use mock segmenter for CGVD testing (no SAM3 required)",
+        help="Use mock segmenter for CGVD testing",
+    )
+    parser.add_argument(
+        "--cgvd_feather_edges",
+        action="store_true",
+        help="Apply edge feathering to CGVD mask transitions",
     )
     parser.add_argument(
         "--cgvd_verbose",
@@ -392,16 +429,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cgvd_save_debug",
         action="store_true",
-        help="Save debug images showing original/mask/distilled (to cgvd_debug/)",
+        help="Save debug images showing original/mask/distilled",
     )
     parser.add_argument(
         "--cgvd_distractor_names",
         type=str,
         nargs="*",
         default=[],
-        help="Object names to remove via inpainting (e.g., fork knife spatula). "
-             "Auto-derived from --distractors if not specified. "
-             "Override to use different names for SAM3 segmentation.",
+        help="Object names to blur as distractors",
+    )
+    parser.add_argument(
+        "--cgvd_darken_strength",
+        type=float,
+        default=0.0,
+        help="Blend blurred distractors toward background (0=pure blur, 1=solid bg)",
     )
     parser.add_argument(
         "--cgvd_robot_threshold",
@@ -426,75 +467,29 @@ if __name__ == "__main__":
         action="store_true",
         help="Ablation: Disable LaMa inpainting (use mean-color fill instead)",
     )
-    # Compositing parameters for CGVD
-    parser.add_argument(
-        "--cgvd_blend_sigma", type=float, default=3.0,
-        help="Gaussian sigma for soft compositing at mask edges (0=hard, default 3.0)",
-    )
-    parser.add_argument(
-        "--cgvd_lama_dilation", type=int, default=11,
-        help="Mask dilation in pixels before safe-set subtraction (default 11, 0=disable)",
-    )
-    parser.add_argument(
-        "--cgvd_cache_refresh", type=int, default=0,
-        help="Re-inpaint cached background every N frames (0=never, default 0)",
-    )
-    parser.add_argument(
-        "--cgvd_safeset_warmup", type=int, default=5,
-        help="Frames to accumulate safe-set detections during warmup (default 5)",
-    )
-    parser.add_argument(
-        "--cgvd_safe_dilation", type=int, default=5,
-        help="Dilate safe-set mask by NxN kernel before Step 4 gating (default 5, 0=disable)",
-    )
-    parser.add_argument(
-        "--cgvd_distractor_iou_threshold", type=float, default=0.15,
-        help="Suppress distractor if this fraction overlaps safe-set (default 0.15)",
-    )
-    # Legacy flags (ignored, kept for backwards compatibility)
-    parser.add_argument("--cgvd_use_inpaint", action="store_true", help="(deprecated, inpainting always enabled)")
-    parser.add_argument("--cgvd_blur_sigma", type=float, default=15.0, help="(deprecated, unused)")
-    parser.add_argument("--cgvd_darken_strength", type=float, default=0.0, help="(deprecated, unused)")
-    parser.add_argument("--cgvd_feather_edges", action="store_true", help="(deprecated, unused)")
+
     args = parser.parse_args()
 
     # Auto-derive cgvd_distractor_names from distractors if not explicitly provided
     if args.distractors and args.use_cgvd and not args.cgvd_distractor_names:
-        # Extract object names from asset IDs
-        # Naming conventions:
-        #   YCB: ycb_<number>_<name> (e.g., "ycb_030_fork" -> "fork")
-        #   RC:  rc_<name>_<number>  (e.g., "rc_fork_11" -> "fork")
-        #   Scale suffix: object:scale (e.g., "ycb_030_fork:0.55")
         derived_names = []
         for asset_id in args.distractors:
-            # Strip scale suffix (e.g., ":0.55")
             asset_id_clean = asset_id.split(":")[0]
             parts = asset_id_clean.split("_")
 
             if len(parts) >= 3:
                 if parts[0] == "ycb":
-                    # YCB: ycb_<number>_<name> -> take last part(s)
-                    # e.g., "ycb_030_fork" -> "fork", "ycb_024_bowl" -> "bowl"
                     name = " ".join(parts[2:])
                 else:
-                    # RC and others: prefix_<name>_<number> -> take middle parts
-                    # e.g., "rc_fork_11" -> "fork", "rc_measuring_spoon_17" -> "measuring spoon"
                     name = " ".join(parts[1:-1])
                 if name and name not in derived_names:
                     derived_names.append(name)
             elif len(parts) == 2:
-                # e.g., "apple_1" -> "apple"
                 name = parts[0]
                 if name and name not in derived_names:
                     derived_names.append(name)
         if derived_names:
             args.cgvd_distractor_names = derived_names
             print(f"[CGVD] Auto-derived distractor names from assets: {derived_names}")
-
-    # check task
-    if "google_robot" in args.task:
-        assert "fractal" in args.checkpoint_path
-    if "widowx" in args.task:
-        assert "bridge" in args.checkpoint_path
 
     main(args)

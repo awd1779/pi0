@@ -1,0 +1,22 @@
+# Distractor objects for banana task (widowx_banana_on_plate)
+# Target: banana | Distractors: yellow/curved fruits and similar objects
+# Format: object_id:scale (scale is optional, defaults to 1.0)
+
+
+ycb_017_orange:0.6
+ycb_013_apple:0.6
+ycb_014_lemon:0.6
+ycb_015_peach:0.6
+rc_cucumber_3:0.1
+ycb_016_pear:0.6 
+
+#bridge_carrot_generated_modified:1.0
+
+#rc_corn_0:0.1
+
+# Bridge training objects (memorized targets - high confusion potential)
+
+
+# Alternative: other bananas if available
+#rc_banana_0:0.1
+#rc_banana_1:0.1

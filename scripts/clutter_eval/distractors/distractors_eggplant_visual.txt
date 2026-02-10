@@ -1,0 +1,10 @@
+# Visual distractors: elongated objects (similar shape)
+ycb_011_banana:0.6
+rc_hot_dog_3:0.1
+rc_baguette_6:0.1
+rc_cucumber_3:0.1
+rc_corn_0:0.1
+rc_rolling_pin_0:0.1
+rc_squash_16:0.1
+rc_carrot_7:0.1
+rc_sweet_potato_2:0.1

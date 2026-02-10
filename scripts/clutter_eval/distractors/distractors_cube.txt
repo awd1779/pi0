@@ -1,0 +1,10 @@
+# Distractor objects for cube task (widowx_stack_cube)
+# Target: green cube | Distractors: small geometric objects
+# Format: object_id:scale (scale is optional, defaults to 1.0)
+
+yellow_cube_3cm
+ycb_036_wood_block:0.1
+ycb_061_foam_brick:0.1
+green_cube_3cm
+ycb_051_large_clamp:0.1
+ycb_052_extra_large_clamp:0.1

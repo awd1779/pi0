@@ -1,0 +1,19 @@
+# Distractor objects for clutter evaluation
+# Format: object_id:scale (scale is optional, defaults to 1.0)
+# Names are auto-derived: rc_fork_11 -> "fork", ycb_030_fork -> "fork", etc.
+
+ycb_030_fork:0.6
+rc_fork_11:0.1
+ycb_037_scissors:0.60
+rc_scissors_3:0.1
+ycb_040_large_marker:0.60
+ycb_032_knife:0.6
+ycb_043_phillips_screwdriver:0.6
+ycb_044_flat_screwdriver:0.6
+
+#ycb_033_spatula:0.4
+#ycb_042_adjustable_wrench:0.5
+#ycb_038_padlock:0.6
+#rc_knife_26:0.3
+#ycb_050_medium_clamp:0.5
+#ycb_048_hammer:0.5

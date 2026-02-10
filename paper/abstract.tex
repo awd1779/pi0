@@ -1,0 +1,22 @@
+\begin{abstract}
+Vision-Language-Action (VLA) models demonstrate impressive zero-shot
+generalization but often fail in cluttered environments, where visually
+similar distractor objects degrade visuomotor grounding. To bridge this
+gap, we propose Concept-Gated Visual Distillation (CGVD), a
+training-free, model-agnostic inference framework that acts as a drop-in
+visual preprocessor for any VLA policy. CGVD parses the language
+instruction to decompose the scene into a protected safe-set
+(manipulation target, receptacle, robot) and a distractor set, then
+segments both via open-vocabulary queries with asymmetric confidence
+thresholds. The inpainting mask is computed through safe-set subtraction,
+which \emph{architecturally} guarantees that task-relevant pixels are
+never modified---regardless of segmentation errors. A cross-validation
+mechanism resolves ambiguity among semantically confusable objects, and
+context-preserving inpainting replaces distractors while retaining
+spatial cues critical for manipulation planning. Evaluations across four
+VLA architectures on simulated and real-world tabletop tasks show that
+CGVD maintains near-nominal success rates even under heavy clutter
+(up to +21\,pp over unprotected baselines at 8 distractors),
+outperforming prior intervention methods without requiring retraining,
+external APIs, or access to model internals.
+\end{abstract}

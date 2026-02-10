@@ -18,12 +18,15 @@
 #   --model, -m          Model backend: pi0 (default), openpi, or groot
 #   --category, -c       Distractor category: semantic, visual, control (default: semantic)
 #   --num_distractors, -n  Number of distractors to use (default: 0 = all from file)
+#   --randomize_distractors  Randomly sample distractors per episode from pool
 #
 # CGVD Ablation Flags:
 #   --cgvd_no_inpaint    Disable LaMa inpainting (mask only)
 #   --cgvd_disable_safeset   Disable safe-set protection
 #   --cgvd_no_robot_mask     Don't mask robot gripper
 #   --cgvd_high_threshold    Use higher masking threshold (0.8)
+#   --cgvd_safe_threshold    Safe-set detection threshold (default: 0.6)
+#   --cgvd_dist_threshold    Distractor detection threshold (default: 0.6)
 #
 # This ensures fair comparison by using the same:
 #   - Random seed (episode IDs and distractor placement)
@@ -39,12 +42,18 @@ TASK="widowx_spoon_on_towel"
 MODEL="pi0"
 CATEGORY="semantic"
 NUM_DISTRACTORS=0  # 0 means use all from file
+RANDOMIZE_DISTRACTORS=false
 
 # CGVD ablation flags
 CGVD_USE_INPAINT=true
 CGVD_DISABLE_SAFESET=false
-CGVD_ROBOT_THRESHOLD=0.30
-CGVD_DISTRACTOR_THRESHOLD=0.6
+CGVD_ROBOT_THRESHOLD=0.3
+CGVD_DISTRACTOR_THRESHOLD=0.30
+CGVD_SAFE_THRESHOLD=0.15  # Safe-set (target/anchor) threshold
+CGVD_BLEND_SIGMA=5.0
+CGVD_LAMA_DILATION=11
+CGVD_CACHE_REFRESH=50
+CGVD_DISTRACTOR_IOU=0.15
 ABLATION_TAG=""
 
 # Parse arguments
@@ -101,6 +110,30 @@ while [[ $# -gt 0 ]]; do
         --cgvd_high_threshold)
             CGVD_DISTRACTOR_THRESHOLD=0.8
             ABLATION_TAG="_high_thresh"
+            shift
+            ;;
+        --cgvd_safe_threshold)
+            CGVD_SAFE_THRESHOLD="$2"
+            shift 2
+            ;;
+        --cgvd_dist_threshold)
+            CGVD_DISTRACTOR_THRESHOLD="$2"
+            shift 2
+            ;;
+        --cgvd_blend_sigma)
+            CGVD_BLEND_SIGMA="$2"
+            shift 2
+            ;;
+        --cgvd_lama_dilation)
+            CGVD_LAMA_DILATION="$2"
+            shift 2
+            ;;
+        --cgvd_cache_refresh)
+            CGVD_CACHE_REFRESH="$2"
+            shift 2
+            ;;
+        --randomize_distractors)
+            RANDOMIZE_DISTRACTORS=true
             shift
             ;;
         *)
@@ -191,15 +224,24 @@ esac
 DEFAULT_DISTRACTORS_FILE="scripts/clutter_eval/distractors/distractors.txt"
 if [[ -n "$DISTRACTORS_FILE" && -f "$DISTRACTORS_FILE" ]]; then
     # Read from specified file
-    # If NUM_DISTRACTORS specified, take only first N distractors from file
-    if [[ $NUM_DISTRACTORS -gt 0 ]]; then
+    if [[ "$RANDOMIZE_DISTRACTORS" == true ]]; then
+        # Pass full pool to Python - it will sample per episode
+        DISTRACTORS=$(grep -v '^#' "$DISTRACTORS_FILE" | grep -v '^$' | tr '\n' ' ' | sed 's/ $//')
+        echo "[Randomize] Full pool: $DISTRACTORS"
+        echo "[Randomize] Will sample $NUM_DISTRACTORS per episode"
+    elif [[ $NUM_DISTRACTORS -gt 0 ]]; then
+        # Current behavior: take only first N distractors from file
         DISTRACTORS=$(grep -v '^#' "$DISTRACTORS_FILE" | grep -v '^$' | head -n $NUM_DISTRACTORS | tr '\n' ' ' | sed 's/ $//')
     else
         DISTRACTORS=$(grep -v '^#' "$DISTRACTORS_FILE" | grep -v '^$' | tr '\n' ' ' | sed 's/ $//')
     fi
 elif [[ -f "$DEFAULT_DISTRACTORS_FILE" ]]; then
     # Read from default file
-    if [[ $NUM_DISTRACTORS -gt 0 ]]; then
+    if [[ "$RANDOMIZE_DISTRACTORS" == true ]]; then
+        DISTRACTORS=$(grep -v '^#' "$DEFAULT_DISTRACTORS_FILE" | grep -v '^$' | tr '\n' ' ' | sed 's/ $//')
+        echo "[Randomize] Full pool: $DISTRACTORS"
+        echo "[Randomize] Will sample $NUM_DISTRACTORS per episode"
+    elif [[ $NUM_DISTRACTORS -gt 0 ]]; then
         DISTRACTORS=$(grep -v '^#' "$DEFAULT_DISTRACTORS_FILE" | grep -v '^$' | head -n $NUM_DISTRACTORS | tr '\n' ' ' | sed 's/ $//')
     else
         DISTRACTORS=$(grep -v '^#' "$DEFAULT_DISTRACTORS_FILE" | grep -v '^$' | tr '\n' ' ' | sed 's/ $//')
@@ -249,6 +291,7 @@ echo "Model: $MODEL_DISPLAY"
 echo "Task: $TASK"
 echo "Category: $CATEGORY"
 echo "Num Distractors: $NUM_DISTRACTORS"
+echo "Randomize Distractors: $RANDOMIZE_DISTRACTORS"
 echo "Episodes per run: $NUM_EPISODES"
 echo "Number of runs: $NUM_RUNS"
 echo "Seeds: $SEEDS"
@@ -259,6 +302,7 @@ echo "  Use Inpaint: $CGVD_USE_INPAINT"
 echo "  Disable Safeset: $CGVD_DISABLE_SAFESET"
 echo "  Robot Threshold: $CGVD_ROBOT_THRESHOLD"
 echo "  Distractor Threshold: $CGVD_DISTRACTOR_THRESHOLD"
+echo "  Safe Threshold: $CGVD_SAFE_THRESHOLD"
 if [[ -n "$ABLATION_TAG" ]]; then
     echo "  Ablation: $ABLATION_TAG"
 fi
@@ -279,10 +323,12 @@ DISTRACTORS=$DISTRACTORS
 DISTRACTORS_FILE=$DISTRACTORS_FILE
 CATEGORY=$CATEGORY
 NUM_DISTRACTORS=$NUM_DISTRACTORS
+RANDOMIZE_DISTRACTORS=$RANDOMIZE_DISTRACTORS
 CGVD_USE_INPAINT=$CGVD_USE_INPAINT
 CGVD_DISABLE_SAFESET=$CGVD_DISABLE_SAFESET
 CGVD_ROBOT_THRESHOLD=$CGVD_ROBOT_THRESHOLD
 CGVD_DISTRACTOR_THRESHOLD=$CGVD_DISTRACTOR_THRESHOLD
+CGVD_SAFE_THRESHOLD=$CGVD_SAFE_THRESHOLD
 ABLATION_TAG=$ABLATION_TAG
 NUM_EPISODES=$NUM_EPISODES
 NUM_RUNS=$NUM_RUNS
@@ -331,12 +377,18 @@ for ((run=0; run<NUM_RUNS; run++)); do
         MODEL_ARGS="--model_path $CHECKPOINT --use_bf16"
     fi
 
+    # Build distractor arguments
+    DISTRACTOR_ARGS="--distractors $DISTRACTORS"
+    if [[ "$RANDOMIZE_DISTRACTORS" == true ]]; then
+        DISTRACTOR_ARGS="$DISTRACTOR_ARGS --num_distractors $NUM_DISTRACTORS --randomize_distractors"
+    fi
+
     xvfb-run -a -s "-screen 0 1024x768x24" $RUN_CMD $EVAL_SCRIPT \
         --task $TASK \
         $MODEL_ARGS \
         --seed $SEED \
         --num_episodes $NUM_EPISODES \
-        --distractors $DISTRACTORS \
+        $DISTRACTOR_ARGS \
         --external_asset_scale 0.1 \
         --recording \
         --output_dir "${RUN_DIR}/baseline" \
@@ -385,9 +437,13 @@ else
 
         # Build CGVD-specific arguments based on ablation settings
         CGVD_ARGS="--use_cgvd --cgvd_update_freq 1 --cgvd_verbose --cgvd_save_debug"
-        CGVD_ARGS="$CGVD_ARGS --cgvd_presence_threshold 0.6"
+        CGVD_ARGS="$CGVD_ARGS --cgvd_presence_threshold $CGVD_SAFE_THRESHOLD"
         CGVD_ARGS="$CGVD_ARGS --cgvd_robot_threshold $CGVD_ROBOT_THRESHOLD"
         CGVD_ARGS="$CGVD_ARGS --cgvd_distractor_threshold $CGVD_DISTRACTOR_THRESHOLD"
+        CGVD_ARGS="$CGVD_ARGS --cgvd_blend_sigma $CGVD_BLEND_SIGMA"
+        CGVD_ARGS="$CGVD_ARGS --cgvd_lama_dilation $CGVD_LAMA_DILATION"
+        CGVD_ARGS="$CGVD_ARGS --cgvd_cache_refresh $CGVD_CACHE_REFRESH"
+        CGVD_ARGS="$CGVD_ARGS --cgvd_distractor_iou_threshold $CGVD_DISTRACTOR_IOU"
 
         # Ablation: Disable inpainting (use mean-color fill instead)
         if [[ "$CGVD_USE_INPAINT" == false ]]; then
@@ -399,12 +455,18 @@ else
             CGVD_ARGS="$CGVD_ARGS --cgvd_disable_safeset"
         fi
 
+        # Build distractor arguments
+        DISTRACTOR_ARGS="--distractors $DISTRACTORS"
+        if [[ "$RANDOMIZE_DISTRACTORS" == true ]]; then
+            DISTRACTOR_ARGS="$DISTRACTOR_ARGS --num_distractors $NUM_DISTRACTORS --randomize_distractors"
+        fi
+
         xvfb-run -a -s "-screen 0 1024x768x24" $RUN_CMD $EVAL_SCRIPT \
             --task $TASK \
             $MODEL_ARGS \
             --seed $SEED \
             --num_episodes $NUM_EPISODES \
-            --distractors $DISTRACTORS \
+            $DISTRACTOR_ARGS \
             --external_asset_scale 0.1 \
             --recording \
             --output_dir "${RUN_DIR}/cgvd" \
@@ -533,7 +595,7 @@ cat >> "$REPORT_FILE" << EOF
 - Algorithm: \`final_mask = distractor_mask AND (NOT safe_mask)\`
 - Safe set: target + anchor + robot (parsed from instruction)
 - Update frequency: 1
-- Safe-set threshold: 0.6
+- Safe-set threshold: $CGVD_SAFE_THRESHOLD
 - Robot threshold: $CGVD_ROBOT_THRESHOLD
 - Distractor threshold: $CGVD_DISTRACTOR_THRESHOLD
 $(if [[ -n "$ABLATION_TAG" ]]; then echo "- **Ablation:** $ABLATION_TAG"; fi)

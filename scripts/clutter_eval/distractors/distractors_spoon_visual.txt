@@ -1,0 +1,10 @@
+# Visual distractors: elongated handheld objects (similar shape)
+ycb_037_scissors:0.6
+ycb_043_phillips_screwdriver:0.6
+ycb_044_flat_screwdriver:0.6
+ycb_040_large_marker:0.6
+rc_scissors_3:0.1
+rc_rolling_pin_0:0.1
+ycb_042_adjustable_wrench:0.6
+ycb_048_hammer:0.6
+ycb_032_knife:0.6

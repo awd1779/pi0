@@ -1,0 +1,103 @@
+\section{Method}
+\label{sec:method}
+
+We present Concept-Gated Visual Distillation (CGVD), a training-free, model-agnostic inference framework that selectively removes distractor objects from a robot's visual observations while task-relevant objects are visible. An overview is shown in Fig.~\ref{fig:pipeline}.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/pipeline.pdf}
+  \caption{CGVD pipeline overview. The language instruction gates which visual concepts are protected (safe-set) and which are removed (distractors). Safe-set subtraction ensures the target is architecturally excluded from the inpainting mask, regardless of segmentation errors.}
+  \label{fig:pipeline}
+\end{figure*}
+
+\subsection{Problem Formulation}
+
+We consider a tabletop manipulation setting with a single fixed third-person camera, consistent with the standard evaluation protocol for VLA models trained on the Bridge dataset~\cite{simplerenv}. Let $\pi_\theta(a_t \mid o_t, l)$ be a VLA policy mapping an observation $o_t \in \mathbb{R}^{H \times W \times 3}$ and instruction $l$ to an action $a_t \in \mathbb{R}^d$. CGVD defines a preprocessor $\mathcal{F}$ that produces a distilled observation $\tilde{o}_t = \mathcal{F}(o_t, l)$ satisfying two invariants:
+\begin{enumerate}
+    \item \textbf{Safety:} Task-relevant pixels in $o_t$ are never modified in $\tilde{o}_t$.
+    \item \textbf{Monotonicity:} $\text{SR}(\pi_\theta \circ \mathcal{F}) \geq \text{SR}(\pi_\theta)$.
+\end{enumerate}
+
+The key insight is that these guarantees can be achieved \emph{architecturally}---through the structure of the pipeline---rather than relying on the accuracy of any individual component.
+
+\subsection{Concept-Gated Decomposition}
+
+CGVD begins by parsing the instruction $l$ to extract a target concept $c_{\text{tgt}}$ and an anchor concept $c_{\text{anc}}$. For instance, ``put the spoon on the towel'' yields $c_{\text{tgt}} = \text{spoon}$ and $c_{\text{anc}} = \text{towel}$. These concepts define two complementary sets that partition the scene:
+
+\begin{itemize}
+    \item The \textbf{safe-set} $\mathcal{S} = \{c_{\text{tgt}}, c_{\text{anc}}, \text{robot}\}$: objects that must be preserved.
+    \item The \textbf{distractor set} $\mathcal{D} = \{d_1, \ldots, d_K\}$: known object categories that may appear as clutter.
+\end{itemize}
+
+This language-grounded decomposition is what makes the approach \emph{concept-gated}: the instruction determines the gate, and only objects outside the gate are candidates for removal. Unlike prior methods that rely on GPT-4o to determine relevance~\cite{byovla, arro}, our parsing is deterministic and requires no external API.
+
+\subsection{Dual-Mask Segmentation}
+
+Both sets are segmented \emph{independently} using a text-prompted segmentation model~\cite{sam2}, producing two masks:
+\begin{align}
+    M_{\text{dist}} &= \textstyle\bigcup_{d_k \in \mathcal{D}} \text{Seg}(o_t, d_k) \\
+    M_{\text{safe}} &= \text{Seg}(o_t, c_{\text{tgt}}) \cup \text{Seg}(o_t, c_{\text{anc}}) \cup \text{Seg}(o_t, \text{robot})
+\end{align}
+
+The independence of these two segmentation passes is a deliberate design choice. Because the safe-set and distractor masks are computed from separate queries, errors in one do not propagate to the other. This redundancy is what enables the safety guarantee in Stage~4.
+
+\textbf{Asymmetric thresholding.} We apply a strict confidence threshold for distractors (reducing false positives) and a permissive threshold for the safe-set (maximizing recall). The asymmetry reflects the cost structure of errors: falsely protecting a distractor is harmless, while failing to protect the target is catastrophic.
+
+\textbf{Warmup accumulation.} During the first $N_w$ frames, both masks are accumulated via union across time. This addresses a practical challenge: the robot arm frequently occludes the target on early frames. By observing multiple frames, CGVD can detect the target when it becomes visible and permanently add it to the safe-set.
+
+\subsection{Cross-Validation for Confusable Objects}
+
+Semantically similar objects pose a unique challenge: a spatula may be detected as both a distractor (``spatula'') and a safe-set member (``spoon''). Na\"ively keeping all safe-set detections would over-protect distractors; dropping ambiguous detections could expose the target.
+
+We resolve this by scoring each target detection $s_i$ against overlapping distractor detections:
+\begin{equation}
+    g(s_i) = \sigma_{\text{safe}}(s_i) - \max_{\substack{d_j \in \mathcal{D},\; \text{IoU}(s_i, d_j) > \eta}} \sigma_{\text{dist}}(d_j)
+\end{equation}
+where $\sigma$ denotes segmentation confidence. Detections with $g(s_i) < 0$ are likely false positives---objects more confidently identified as distractors than as targets---and are removed from the safe-set. Crucially, the detection with the highest $g$ is always retained, ensuring that at least one genuine target survives. Anchor detections are never filtered, as over-protecting the receptacle carries no cost.
+
+\subsection{Safe-Set Subtraction}
+
+The final inpainting mask is computed via set-theoretic subtraction:
+\begin{equation}
+    M_{\text{final}} = M_{\text{dist}} \setminus \text{dilate}(M_{\text{safe}}, r)
+    \label{eq:safeset}
+\end{equation}
+
+This single operation is the core of CGVD's safety guarantee. Regardless of how many distractor categories erroneously overlap with the target, the safe-set mask subtracts them all. The morphological dilation creates a protective buffer around safe-set boundaries, compensating for potential under-segmentation at object edges.
+
+\textbf{Why this is robust.} Consider the worst case: SAM detects the target spoon as both ``spoon'' (safe-set) and ``fork'' (distractor) simultaneously. The distractor mask includes the spoon's pixels, but the safe-set mask independently covers the same region. Subtraction removes these pixels from $M_{\text{final}}$, and the spoon is preserved. This guarantee holds for \emph{any} segmentation error, as long as the safe-set detection has nonzero recall on the target---a condition ensured by asymmetric thresholding and warmup accumulation.
+
+\subsection{Context-Preserving Inpainting}
+
+Rather than aggressively replacing the background (as in ARRO~\cite{arro}), CGVD selectively inpaints only the distractor regions using LaMa~\cite{lama}, a Fourier convolution-based model that generates realistic fills using global image context. This preserves spatial relationships---receptacle locations, surface boundaries, obstacle positions---that are critical for multi-step manipulation tasks.
+
+The inpainted background is cached and composited with the live frame via feathered blending, where distractor regions show the clean background and all other regions show the current camera frame. This cached compositing approach provides temporal consistency across the episode while allowing the robot and target to move naturally.
+
+\subsection{Automatic Fallback}
+
+If the target is not detected during warmup, CGVD cannot guarantee the safety invariant and therefore disables itself for the episode, passing observations through unmodified. This ensures the monotonicity property: CGVD either helps (when it can reliably identify the target) or does nothing (when it cannot), but never harms.
+
+\subsection{Comparison with Prior Methods}
+
+Table~\ref{tab:method_comparison} highlights the key architectural differences. BYOVLA~\cite{byovla} relies on a sensitivity probe---$K$ additional VLA forward passes per region---to decide whether to intervene, making target protection contingent on the probe's accuracy and incompatible with black-box policies. ARRO~\cite{arro} replaces the entire background, destroying scene context and offering no recovery when tracking fails. CGVD provides deterministic protection through its dual-mask architecture, requires no access to the VLA's internals, and preserves the full spatial context of the scene.
+
+\begin{table}[t]
+\centering
+\caption{Comparison of inference-time visual intervention methods for VLA robustness.}
+\label{tab:method_comparison}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+ & BYOVLA~\cite{byovla} & ARRO~\cite{arro} & \textbf{CGVD (Ours)} \\
+\midrule
+Target protection guarantee & Probabilistic & None & \textbf{Architectural} \\
+VLA forward passes required & $K$/region & 0 & \textbf{0} \\
+External API dependency & GPT-4o & GPT-4o & \textbf{None} \\
+Scene context preserved & Yes & No & \textbf{Yes} \\
+Fallback on detection failure & None & None & \textbf{Auto-disable} \\
+Handles confusable objects & No & No & \textbf{Cross-validation} \\
+Black-box VLA compatible & No & Yes & \textbf{Yes} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}

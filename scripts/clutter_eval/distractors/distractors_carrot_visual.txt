@@ -1,0 +1,10 @@
+# Visual distractors: orange/elongated objects (similar appearance)
+ycb_011_banana:0.6
+ycb_017_orange:0.6
+ycb_014_lemon:0.6
+rc_mango_12:0.1
+rc_tangerine_2:0.07
+rc_cucumber_3:0.1
+rc_broccoli_3:0.07
+rc_bread_11:0.07
+rc_hot_dog_3:0.08

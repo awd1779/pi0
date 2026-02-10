@@ -1,0 +1,30 @@
+# Distractor objects for carrot task (widowx_carrot_on_plate)
+# Target: carrot | Distractors: orange/yellow elongated objects
+# Format: object_id:scale (scale is optional, defaults to 1.0)
+
+ycb_011_banana:0.6
+ycb_012_strawberry:0.5
+rc_cucumber_3:0.1
+ycb_017_orange:0.6
+
+#rc_broccoli_3:0.07
+#rc_kiwi_4:0.06
+#rc_avocado_2:0.07
+#rc_orange_1:0.06
+
+
+#rc_tomato_6:0.3
+#ycb_043_phillips_screwdriver:0.6
+#ycb_017_orange:0.6
+#ycb_012_strawberry:0.6
+#ycb_014_lemon:0.6
+#ycb_012_strawberry:0.6
+#ycb_013_apple:0.6
+#ycb_017_orange:0.6
+#ycb_015_peach:0.6
+#rc_avocado_2:0.1
+#rc_cucumber_3:0.1
+#rc_tomato_6:0.3
+#ycb_024_bowl:0.6
+#ycb_baguette_6:0.5
+#ycb_018_plum:0.6

@@ -1,0 +1,121 @@
+# Utensil distractors for spoon task (widowx_spoon_on_towel)
+# Pool size: 20 (RoboCasa only)
+# Category: utensils - forks, knives, spatulas, scissors
+# Scale: RoboCasa objects use 0.15
+
+# === ACTIVE POOL (20 distractors) ===
+
+# Forks (4)
+rc_fork_0:0.15
+rc_fork_1:0.15
+rc_fork_4:0.15
+rc_fork_7:0.15
+
+# Knives (6)
+rc_knife_0:0.15
+rc_knife_7:0.15
+rc_knife_20:0.15
+rc_knife_23:0.15
+rc_knife_25:0.15
+rc_knife_26:0.15
+
+# Spatulas (5)
+rc_spatula_1:0.15
+rc_spatula_4:0.15
+rc_spatula_8:0.15
+rc_spatula_11:0.15
+rc_spatula_3:0.15
+
+# Scissors (5)
+rc_scissors_0:0.15
+rc_scissors_6:0.15
+rc_scissors_12:0.15
+rc_scissors_4:0.15
+rc_scissors_8:0.15
+
+# === RESERVE POOL (remaining RC utensils) ===
+
+# Additional Forks
+#rc_fork_2:0.1
+#rc_fork_3:0.1
+#rc_fork_5:0.1
+#rc_fork_6:0.1
+#rc_fork_8:0.1
+#rc_fork_9:0.1
+#rc_fork_10:0.1
+#rc_fork_11:0.1
+
+# Additional Knives
+#rc_knife_1:0.1
+#rc_knife_2:0.1
+#rc_knife_3:0.1
+#rc_knife_4:0.1
+#rc_knife_5:0.1
+#rc_knife_6:0.1
+#rc_knife_8:0.1
+#rc_knife_9:0.1
+#rc_knife_10:0.1
+#rc_knife_11:0.1
+#rc_knife_12:0.1
+#rc_knife_13:0.1
+#rc_knife_15:0.1
+#rc_knife_16:0.1
+#rc_knife_17:0.1
+#rc_knife_18:0.1
+#rc_knife_19:0.1
+#rc_knife_21:0.1
+#rc_knife_22:0.1
+#rc_knife_24:0.1
+#rc_knife_27:0.1
+
+# Additional Spatulas
+#rc_spatula_0:0.1
+#rc_spatula_2:0.1
+#rc_spatula_5:0.1
+#rc_spatula_6:0.1
+#rc_spatula_7:0.1
+#rc_spatula_9:0.1
+#rc_spatula_10:0.1
+#rc_spatula_12:0.1
+#rc_spatula_13:0.1
+
+# Ladles (excluded)
+#rc_ladle_0:0.1
+#rc_ladle_1:0.1
+#rc_ladle_2:0.1
+#rc_ladle_3:0.1
+#rc_ladle_4:0.1
+
+# Additional Scissors
+#rc_scissors_1:0.1
+#rc_scissors_3:0.1
+#rc_scissors_9:0.1
+#rc_scissors_10:0.1
+#rc_scissors_11:0.1
+#rc_scissors_13:0.1
+
+# === EXCLUDED (spoons - same as target) ===
+#rc_spoon_0:0.1
+#rc_spoon_1:0.1
+#rc_spoon_2:0.1
+#rc_spoon_3:0.1
+#rc_spoon_4:0.1
+#rc_spoon_5:0.1
+#rc_spoon_6:0.1
+#rc_spoon_7:0.1
+#rc_spoon_8:0.1
+#rc_spoon_9:0.1
+#rc_spoon_10:0.1
+#rc_spoon_11:0.1
+#rc_spoon_12:0.1
+#rc_spoon_13:0.1
+#rc_spoon_14:0.1
+#rc_spoon_15:0.1
+#rc_spoon_16:0.1
+#rc_spoon_17:0.1
+#rc_spoon_18:0.1
+#rc_spoon_19:0.1
+#rc_spoon_20:0.1
+#rc_spoon_21:0.1
+#rc_spoon_22:0.1
+#rc_spoon_23:0.1

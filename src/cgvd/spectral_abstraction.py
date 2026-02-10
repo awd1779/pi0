@@ -1,7 +1,12 @@
 """Spectral Visual Abstraction for background neutralization."""
 
+from typing import TYPE_CHECKING, Optional
+
 import cv2
 import numpy as np
+
+if TYPE_CHECKING:
+    from src.cgvd.lama_inpainter import LamaInpainter
 
 
 class SpectralAbstraction:
@@ -99,7 +104,9 @@ class SpectralAbstraction:
         return distilled.astype(np.uint8)
 
     def apply_to_masked_regions(
-        self, image: np.ndarray, mask: np.ndarray
+        self, image: np.ndarray, mask: np.ndarray,
+        darken_strength: float = 0.0,
+        table_color: Optional[np.ndarray] = None
     ) -> np.ndarray:
         """Blur ONLY the masked regions, keep everything else sharp.
 
@@ -112,6 +119,12 @@ class SpectralAbstraction:
             image: Input RGB image, shape (H, W, 3), dtype uint8
             mask: Binary mask where 1 = blur (distractor), 0 = keep sharp
                   Shape (H, W), dtype bool or float
+            darken_strength: Blend toward background color (0=pure blur, 1=solid bg).
+                           This helps dim bright objects (e.g., white dishes) that
+                           remain visible after blurring.
+            table_color: Optional RGB table color from SAM3 segmentation. If provided,
+                        used as the background color for darkening. If None, falls back
+                        to sampling from non-masked pixels.
 
         Returns:
             Distilled image with blurred distractors and sharp background,
@@ -134,6 +147,22 @@ class SpectralAbstraction:
             image, ksize=(0, 0), sigmaX=self.sigma, sigmaY=self.sigma
         )
 
+        # Darken blurred regions by blending toward table color
+        if darken_strength > 0:
+            if table_color is not None:
+                bg_color = table_color
+            else:
+                # Fallback: sample from non-masked pixels
+                bg_mask = mask < 0.5
+                if bg_mask.any():
+                    bg_color = image[bg_mask].mean(axis=0).astype(np.float32)
+                else:
+                    bg_color = np.array([128, 128, 128], dtype=np.float32)
+
+            # Blend blurred toward table color
+            blurred = blurred.astype(np.float32)
+            blurred = (1 - darken_strength) * blurred + darken_strength * bg_color
+
         # Expand mask to 3 channels for broadcasting
         mask_3d = mask[..., np.newaxis].astype(np.float32)
 
@@ -145,3 +174,21 @@ class SpectralAbstraction:
         )
 
         return distilled.astype(np.uint8)
+
+    def apply_inpaint(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        inpainter: "LamaInpainter",
+    ) -> np.ndarray:
+        """Remove masked regions via AI inpainting.
+
+        Args:
+            image: Input RGB image [H, W, 3] uint8
+            mask: Binary mask where 1 = remove (inpaint), 0 = keep
+            inpainter: LamaInpainter instance
+
+        Returns:
+            Inpainted image with distractors removed
+        """
+        return inpainter.inpaint(image, mask)

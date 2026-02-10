@@ -1,0 +1,10 @@
+# Semantic distractors: vegetables (same category as eggplant)
+rc_cucumber_3:0.1
+rc_squash_16:0.1
+rc_corn_0:0.1
+rc_sweet_potato_2:0.1
+rc_bell_pepper_1:0.1
+rc_broccoli_3:0.1
+rc_potato_5:0.1
+rc_onion_1:0.1
+rc_carrot_7:0.1

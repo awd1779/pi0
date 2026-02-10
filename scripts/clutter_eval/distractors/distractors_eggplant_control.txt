@@ -1,0 +1,10 @@
+# Control distractors: random objects (no semantic/visual similarity)
+ycb_013_apple:0.6
+ycb_017_orange:0.6
+ycb_056_tennis_ball:0.6
+ycb_025_mug:0.6
+ycb_030_fork:0.6
+rc_cup_2:0.1
+ycb_077_rubiks_cube:0.6
+ycb_061_foam_brick:0.6
+rc_bagel_6:0.1

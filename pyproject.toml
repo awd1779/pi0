@@ -13,6 +13,8 @@ classifiers = [
 dependencies = [
     "bitsandbytes==0.45.0",
     "einops",
+    "opencv-python>=4.8.0",  # Required for CGVD spectral abstraction
+    "simple-lama-inpainting>=0.1.0",  # LaMa inpainting for CGVD distractor removal
     "gsutil>=5.32",
     "hydra-core",
     "imageio",
@@ -26,11 +28,12 @@ dependencies = [
     "tensorflow==2.15.0",
     "tensorflow_datasets==4.9.2",
     "torch==2.5.0",
-    "transformers==4.47.1",
+    "transformers>=4.47.1",  # SAM3 requires main branch; install separately: pip install git+https://github.com/huggingface/transformers.git@main
     "tqdm",
     "wandb",
     "simpler-env",
     "mani-skill2-real2sim",
+    "torchvision>=0.20.0",
 ]
 
 [build-system]
@@ -55,3 +58,4 @@ ignore = ["E203", "E501", "B006", "B026", "B905"]
 [tool.uv.sources]
 simpler-env = { path = "../allenzren_SimplerEnv", editable = true }
 mani-skill2-real2sim = { path = "../allenzren_SimplerEnv/ManiSkill2_real2sim", editable = true }
+transformers = { git = "https://github.com/huggingface/transformers.git", rev = "main" }
