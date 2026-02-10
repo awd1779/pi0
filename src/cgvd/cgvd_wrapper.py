@@ -158,6 +158,7 @@ class CGVDWrapper(gym.Wrapper):
         self.last_robot_mask: Optional[np.ndarray] = None  # Store robot mask for compositing
         self.current_safe_mask: Optional[np.ndarray] = None  # Per-frame safe mask (target + anchor + robot)
         self._target_detected_in_warmup: bool = False  # Whether the target specifically was detected during warmup
+        self._safe_mask_votes: Optional[np.ndarray] = None  # Per-pixel detection count during warmup
 
         # State - confidence scores and individual masks for debug display
         self.distractor_scores: Dict[str, float] = {}
@@ -383,6 +384,7 @@ class CGVDWrapper(gym.Wrapper):
         self.last_robot_mask = None
         self.current_safe_mask = None
         self._target_detected_in_warmup = False
+        self._safe_mask_votes = None
         self.distractor_scores = {}
         self.safe_scores = {}
         self.frame_count = 0
@@ -579,10 +581,21 @@ class CGVDWrapper(gym.Wrapper):
                 self.safe_scores = self.segmenter.last_scores.copy()
                 self.safe_individual_masks = self.segmenter.last_individual_masks.copy()
 
-                # For safe-set: keep ALL instances (union), don't filter to top-1.
-                # Over-protection (keeping a spatula detected as "spoon") is harmless,
-                # but under-protection (dropping the real spoon) causes task failure.
-                # raw_target_mask already contains the union from segmenter.segment().
+                # Keep only top-scoring instance per concept (e.g., highest-scoring "spoon").
+                # The real target typically scores higher than false positives (e.g., spatula
+                # misdetected as "spoon" with 0.72 vs real spoon at 0.87). Top-1 filtering
+                # prevents the false positive from entering the safe-set, which would create
+                # a hole in the distractor mask where the spatula should be inpainted away.
+                # Combined with majority voting across warmup frames, this is robust even
+                # if top-1 occasionally picks the wrong instance on a single frame.
+                filtered_masks, filtered_scores = self._filter_overlapping_detections(
+                    self.safe_individual_masks, self.safe_scores
+                )
+                raw_target_mask = np.zeros_like(raw_target_mask)
+                for m in filtered_masks.values():
+                    raw_target_mask = np.maximum(raw_target_mask, m)
+                self.safe_individual_masks = filtered_masks
+                self.safe_scores = filtered_scores
 
                 # Always log scores to file (if enabled), print only if verbose
                 scores_str = ", ".join(f"{k}={v:.3f}" for k, v in self.safe_scores.items())
@@ -602,26 +615,31 @@ class CGVDWrapper(gym.Wrapper):
                 if self.cached_safe_mask is None:
                     # First frame: initialize
                     self.cached_safe_mask = raw_target_mask
+                    self._safe_mask_votes = (raw_target_mask > 0.5).astype(np.float32)
                 else:
                     # Warm-up frames: accumulate (union of all detections)
                     self.cached_safe_mask = np.maximum(self.cached_safe_mask, raw_target_mask)
+                    if self._safe_mask_votes is None:
+                        self._safe_mask_votes = (raw_target_mask > 0.5).astype(np.float32)
+                    else:
+                        self._safe_mask_votes += (raw_target_mask > 0.5).astype(np.float32)
 
-                # Cross-validate: remove target instances that are actually distractors.
-                # Uses genuineness scoring (safe_score - max_dist_score) to keep
-                # the real target while removing false positives (e.g., spatula as "spoon").
+                # Cross-validate for logging only (keep diagnostic info).
+                # Top-1 filtering handles false positive rejection.
                 fp_mask = self._cross_validate_safeset(
                     self.safe_individual_masks, self.safe_scores,
                     self.distractor_individual_masks, self.distractor_scores,
                 )
-                # Only cross-validate during warmup when distractor masks are fresh.
-                # During deferred detection, distractor_individual_masks is stale
-                # (frozen from last warmup frame), so cross-validation would
-                # incorrectly remove the real target as a false positive.
-                if fp_mask is not None and not in_deferred:
-                    self.cached_safe_mask = np.logical_and(
-                        self.cached_safe_mask > 0.5,
-                        fp_mask < 0.5,
-                    ).astype(np.float32)
+
+                # On last warmup frame, log vote statistics for diagnostics.
+                # Safe-set uses union accumulation (np.maximum) — robust to SAM3
+                # detection gaps. Top-1 filtering handles false positive rejection.
+                is_last_warmup = in_warmup and (self.frame_count == self.safeset_warmup_frames - 1)
+                if is_last_warmup and self._safe_mask_votes is not None:
+                    union_pixels = int((self.cached_safe_mask > 0.5).sum())
+                    max_votes = int(self._safe_mask_votes.max())
+                    self._log(f"[CGVD] Safe-set finalized: {union_pixels} pixels "
+                              f"(union of {self.safeset_warmup_frames} frames, max_votes={max_votes})")
 
                 if self.verbose:
                     cov = self.cached_safe_mask.sum() / self.cached_safe_mask.size * 100
