@@ -10,14 +10,15 @@ rc_fork_0:0.15
 rc_fork_1:0.15
 rc_fork_4:0.15
 rc_fork_7:0.15
+rc_fork_11:0.1
 
-# Knives (6)
+# Knives (5)
 rc_knife_0:0.15
 rc_knife_7:0.15
 rc_knife_20:0.15
 rc_knife_23:0.15
 rc_knife_25:0.15
-rc_knife_26:0.15
+
 
 # Spatulas (5)
 rc_spatula_1:0.15

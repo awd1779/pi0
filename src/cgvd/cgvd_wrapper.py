@@ -156,6 +156,8 @@ class CGVDWrapper(gym.Wrapper):
         self.cached_safe_mask: Optional[np.ndarray] = None  # Safe set mask (target + anchor + robot)
         self.cached_inpainted_image: Optional[np.ndarray] = None  # Cached inpainted background for compositing
         self.last_robot_mask: Optional[np.ndarray] = None  # Store robot mask for compositing
+        self.cached_robot_mask: Optional[np.ndarray] = None  # Accumulated robot mask from warmup
+        self.last_distilled_image: Optional[np.ndarray] = None  # Previous frame's distilled output for robot detection
         self.current_safe_mask: Optional[np.ndarray] = None  # Per-frame safe mask (target + anchor + robot)
         self._target_detected_in_warmup: bool = False  # Whether the target specifically was detected during warmup
         self._safe_mask_votes: Optional[np.ndarray] = None  # Per-pixel detection count during warmup
@@ -382,6 +384,8 @@ class CGVDWrapper(gym.Wrapper):
         self.cached_safe_mask = None
         self.cached_inpainted_image = None
         self.last_robot_mask = None
+        self.cached_robot_mask = None
+        self.last_distilled_image = None
         self.current_safe_mask = None
         self._target_detected_in_warmup = False
         self._safe_mask_votes = None
@@ -649,11 +653,17 @@ class CGVDWrapper(gym.Wrapper):
             # Step 3b: Robot mask - tracked every frame
             if self.include_robot:
                 robot_concepts = "robot arm. robot gripper"
+                robot_image = self.last_distilled_image if self.last_distilled_image is not None else image
                 robot_mask = self.segmenter.segment(
-                    image, robot_concepts, presence_threshold=self.robot_presence_threshold
+                    robot_image, robot_concepts, presence_threshold=self.robot_presence_threshold
                 )
                 self.safe_scores.update(self.segmenter.last_scores)
                 self.last_robot_mask = robot_mask  # Store for compositing
+                if in_warmup:
+                    if self.cached_robot_mask is None:
+                        self.cached_robot_mask = robot_mask.copy()
+                    else:
+                        self.cached_robot_mask = np.maximum(self.cached_robot_mask, robot_mask)
                 # Combine cached target+anchor with fresh robot mask
                 safe_mask = np.maximum(self.cached_safe_mask, robot_mask)
                 if self.verbose:
@@ -764,6 +774,7 @@ class CGVDWrapper(gym.Wrapper):
         # Write distilled image back to observation
         # IMPORTANT: Write to the SAME camera we read from (camera_name)
         obs = self._write_image_to_obs(obs, distilled, camera_name)
+        self.last_distilled_image = distilled.copy()
 
         # Save debug images if enabled
         if self.save_debug_images:
@@ -855,33 +866,21 @@ class CGVDWrapper(gym.Wrapper):
                 else:
                     robot_binary_dilated = robot_binary
 
-                # In distractor zones: use eroded (conservative) robot mask to keep
-                # robot visible while stripping SAM3 false-positive boundary pixels.
-                # Outside distractor zones: keep dilated mask for halo elimination.
-                # Previous approach (zeroing all robot pixels in distractor zones)
-                # caused the robot to disappear entirely. Previous np.where(
-                # distractor_zone, undilated, dilated) still had SAM3 false positives
-                # in the undilated mask. Erosion removes the 1-2px boundary fuzz
-                # where false detections occur.
+                # In distractor zones: use raw binarized robot mask.
+                # Previously used eroded mask to strip SAM3 boundary false positives,
+                # but the ~2px erosion gap lets Mechanism 2 force feathered=1.0 at the
+                # robot boundary, showing clean plate (table texture) instead of the
+                # live robot — creating a visible halo. Raw binarized mask (thresholded
+                # at >0.5) is sufficient to filter low-confidence SAM3 boundary pixels.
                 if self.cached_distractor_mask is not None:
                     distractor_zone = (self.cached_distractor_mask > 0.5).astype(np.float32)
                     non_distractor = 1.0 - distractor_zone
 
-                    # Erode robot_binary to get conservative (confident-only) robot
-                    # pixels. 3x3 kernel with 1 iteration strips ~1px boundary fuzz.
-                    if robot_binary.max() > 0:
-                        _erode_kern = np.ones((3, 3), np.uint8)
-                        robot_conservative = cv2.erode(
-                            robot_binary.astype(np.uint8), _erode_kern, iterations=1
-                        ).astype(np.float32)
-                    else:
-                        robot_conservative = robot_binary
-
                     # Outside distractors: dilated (halo elimination)
-                    # Inside distractors: eroded (confident-only, no false positives)
+                    # Inside distractors: raw binarized (no erosion gap)
                     robot_binary_dilated = (
                         robot_binary_dilated * non_distractor
-                        + robot_conservative * distractor_zone
+                        + robot_binary * distractor_zone
                     )
 
                 reinforce_mask = np.maximum(binary_target, robot_binary_dilated)
@@ -906,7 +905,7 @@ class CGVDWrapper(gym.Wrapper):
         """
         mask = self.cached_mask.copy()
         if self.include_robot and self.last_robot_mask is not None:
-            robot = self.last_robot_mask
+            robot = self.cached_robot_mask if self.cached_robot_mask is not None else self.last_robot_mask
             # Dilate robot mask to cover GaussianBlur spread (~2σ beyond
             # cached_mask boundary) for the clean plate. Without this, the
             # gap between undilated robot mask and dilated-safe hole in
