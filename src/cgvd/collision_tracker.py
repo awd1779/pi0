@@ -54,40 +54,34 @@ class CollisionTracker:
 
     def _identify_gripper_links(self):
         """Identify gripper links by name patterns from the robot articulation."""
-        try:
-            robot = self.env.unwrapped.agent.robot
-            for link in robot.get_links():
-                link_name = link.name.lower()
-                for pattern in self.GRIPPER_LINK_PATTERNS:
-                    if pattern in link_name:
-                        self._gripper_links.add(link)
-                        self._gripper_link_names.add(link.name)
-                        break
-            if self._gripper_link_names:
-                print(f"[CollisionTracker] Found gripper links: {self._gripper_link_names}")
-        except Exception as e:
-            print(f"[CollisionTracker] Warning: Could not identify gripper links: {e}")
+        robot = self.env.unwrapped.agent.robot
+        for link in robot.get_links():
+            link_name = link.name.lower()
+            for pattern in self.GRIPPER_LINK_PATTERNS:
+                if pattern in link_name:
+                    self._gripper_links.add(link)
+                    self._gripper_link_names.add(link.name)
+                    break
+        if self._gripper_link_names:
+            print(f"[CollisionTracker] Found gripper links: {self._gripper_link_names}")
 
     def _identify_distractor_actors(self):
         """Identify distractor actors in the scene."""
-        try:
-            for actor in self._scene.get_all_actors():
-                actor_name = actor.name
-                # Match distractor_ prefix (from DistractorWrapper)
-                if actor_name.startswith("distractor_"):
-                    self._distractor_actors.add(actor)
-                    self._distractor_actor_names.add(actor_name)
-                # Also match explicit distractor names if provided
-                elif self._distractor_names:
-                    for name in self._distractor_names:
-                        if name in actor_name:
-                            self._distractor_actors.add(actor)
-                            self._distractor_actor_names.add(actor_name)
-                            break
-            if self._distractor_actor_names:
-                print(f"[CollisionTracker] Found distractor actors: {self._distractor_actor_names}")
-        except Exception as e:
-            print(f"[CollisionTracker] Warning: Could not identify distractor actors: {e}")
+        for actor in self._scene.get_all_actors():
+            actor_name = actor.name
+            # Match distractor_ prefix (from DistractorWrapper)
+            if actor_name.startswith("distractor_"):
+                self._distractor_actors.add(actor)
+                self._distractor_actor_names.add(actor_name)
+            # Also match explicit distractor names if provided
+            elif self._distractor_names:
+                for name in self._distractor_names:
+                    if name in actor_name:
+                        self._distractor_actors.add(actor)
+                        self._distractor_actor_names.add(actor_name)
+                        break
+        if self._distractor_actor_names:
+            print(f"[CollisionTracker] Found distractor actors: {self._distractor_actor_names}")
 
     def reset(self):
         """Reset collision tracking state for new episode."""
@@ -109,33 +103,29 @@ class CollisionTracker:
             Tuple of (is_collision, distractor_name) where distractor_name is
             the name of the collided distractor or None if no collision.
         """
-        try:
-            # Get actors from contact - try different SAPIEN API versions
-            actor0 = getattr(contact, 'actor0', None) or getattr(contact, 'actors', [None, None])[0]
-            actor1 = getattr(contact, 'actor1', None) or getattr(contact, 'actors', [None, None])[1]
+        # Get actors from contact - try different SAPIEN API versions
+        actor0 = getattr(contact, 'actor0', None) or getattr(contact, 'actors', [None, None])[0]
+        actor1 = getattr(contact, 'actor1', None) or getattr(contact, 'actors', [None, None])[1]
 
-            if actor0 is None or actor1 is None:
-                return False, None
-
-            # Get names safely
-            name0 = getattr(actor0, 'name', '') or ''
-            name1 = getattr(actor1, 'name', '') or ''
-
-            # Check if one is gripper and other is distractor using name matching
-            is_gripper0 = name0 in self._gripper_link_names or any(p in name0.lower() for p in self.GRIPPER_LINK_PATTERNS)
-            is_gripper1 = name1 in self._gripper_link_names or any(p in name1.lower() for p in self.GRIPPER_LINK_PATTERNS)
-            is_distractor0 = name0 in self._distractor_actor_names or name0.startswith("distractor_")
-            is_distractor1 = name1 in self._distractor_actor_names or name1.startswith("distractor_")
-
-            if is_gripper0 and is_distractor1:
-                return True, name1
-            elif is_gripper1 and is_distractor0:
-                return True, name0
-
+        if actor0 is None or actor1 is None:
             return False, None
 
-        except Exception:
-            return False, None
+        # Get names safely
+        name0 = getattr(actor0, 'name', '') or ''
+        name1 = getattr(actor1, 'name', '') or ''
+
+        # Check if one is gripper and other is distractor using name matching
+        is_gripper0 = name0 in self._gripper_link_names or any(p in name0.lower() for p in self.GRIPPER_LINK_PATTERNS)
+        is_gripper1 = name1 in self._gripper_link_names or any(p in name1.lower() for p in self.GRIPPER_LINK_PATTERNS)
+        is_distractor0 = name0 in self._distractor_actor_names or name0.startswith("distractor_")
+        is_distractor1 = name1 in self._distractor_actor_names or name1.startswith("distractor_")
+
+        if is_gripper0 and is_distractor1:
+            return True, name1
+        elif is_gripper1 and is_distractor0:
+            return True, name0
+
+        return False, None
 
     def check_collisions(self, step_num: int) -> bool:
         """Check for gripper-distractor collisions at current timestep.
@@ -152,24 +142,19 @@ class CollisionTracker:
         if not self._distractor_actor_names and not self._distractor_actors:
             return False
 
-        try:
-            contacts = self._scene.get_contacts()
-            collision_detected = False
+        contacts = self._scene.get_contacts()
+        collision_detected = False
 
-            for contact in contacts:
-                is_collision, distractor_name = self._is_gripper_distractor_contact(contact)
-                if is_collision:
-                    self.collision_count += 1
-                    self.collision_frames.append(step_num)
-                    if distractor_name:
-                        self._collided_distractors.add(distractor_name)
-                    collision_detected = True
+        for contact in contacts:
+            is_collision, distractor_name = self._is_gripper_distractor_contact(contact)
+            if is_collision:
+                self.collision_count += 1
+                self.collision_frames.append(step_num)
+                if distractor_name:
+                    self._collided_distractors.add(distractor_name)
+                collision_detected = True
 
-            return collision_detected
-
-        except Exception as e:
-            # Silently handle errors - contacts API may not be available
-            return False
+        return collision_detected
 
     def get_stats(self) -> Dict:
         """Get collision statistics.

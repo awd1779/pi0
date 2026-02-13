@@ -18,13 +18,10 @@ from src.cgvd.sam3_segmenter import (
     clear_sam3_singleton,
     get_sam3_segmenter,
 )
-from src.cgvd.spectral_abstraction import SpectralAbstraction
-
 __all__ = [
     "CGVDWrapper",
     "SAM3Segmenter",
     "InstructionParser",
-    "SpectralAbstraction",
     # Evaluation metrics
     "CollisionTracker",
     "GraspAnalyzer",

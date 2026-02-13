@@ -74,14 +74,11 @@ class GraspAnalyzer:
         Returns:
             Target object position as [x, y, z] or None if not available
         """
-        try:
-            base_env = self.env.unwrapped
-            # SimplerEnv stores target object as episode_source_obj
-            if hasattr(base_env, 'episode_source_obj') and base_env.episode_source_obj is not None:
-                return np.array(base_env.episode_source_obj.pose.p)
-            return None
-        except Exception:
-            return None
+        base_env = self.env.unwrapped
+        # SimplerEnv stores target object as episode_source_obj
+        if hasattr(base_env, 'episode_source_obj') and base_env.episode_source_obj is not None:
+            return np.array(base_env.episode_source_obj.pose.p)
+        return None
 
     def _get_gripper_position(self) -> Optional[np.ndarray]:
         """Get current gripper position from environment.
@@ -89,20 +86,17 @@ class GraspAnalyzer:
         Returns:
             Gripper TCP position as [x, y, z] or None if not available
         """
-        try:
-            base_env = self.env.unwrapped
-            # Try to get TCP position from agent
-            if hasattr(base_env, 'agent'):
-                agent = base_env.agent
-                if hasattr(agent, 'tcp') and agent.tcp is not None:
-                    return np.array(agent.tcp.pose.p)
-                # Fallback: use end effector link
-                if hasattr(agent, 'robot'):
-                    ee_link = agent.robot.get_links()[-1]  # Last link is typically EE
-                    return np.array(ee_link.pose.p)
-            return None
-        except Exception:
-            return None
+        base_env = self.env.unwrapped
+        # Try to get TCP position from agent
+        if hasattr(base_env, 'agent'):
+            agent = base_env.agent
+            if hasattr(agent, 'tcp') and agent.tcp is not None:
+                return np.array(agent.tcp.pose.p)
+            # Fallback: use end effector link
+            if hasattr(agent, 'robot'):
+                ee_link = agent.robot.get_links()[-1]  # Last link is typically EE
+                return np.array(ee_link.pose.p)
+        return None
 
     def _get_gripper_state(self, action: np.ndarray) -> float:
         """Extract gripper command from action.
@@ -113,13 +107,10 @@ class GraspAnalyzer:
         Returns:
             Gripper command value (negative = close, positive = open)
         """
-        try:
-            # Standard format: action[6] is gripper for 7-DOF arm
-            if len(action) >= 7:
-                return float(action[6])
-            return 0.0
-        except Exception:
-            return 0.0
+        # Standard format: action[6] is gripper for 7-DOF arm
+        if len(action) >= 7:
+            return float(action[6])
+        return 0.0
 
     def on_step(self, obs: Dict[str, Any], action: np.ndarray, step_num: int):
         """Called after each environment step to update tracking.

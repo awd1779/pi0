@@ -1,0 +1,36 @@
+# Large dirs — mount at runtime instead
+checkpoints/
+logs/
+videos/
+cgvd_debug/
+
+# Git
+.git/
+.gitignore
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Claude
+.claude/
+
+# Media / docs (not needed at runtime)
+media/
+paper/
+figures/
+doc/
+
+# UV cache (will be rebuilt in container)
+.venv/

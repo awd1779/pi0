@@ -81,6 +81,8 @@ def main():
 
                 # Run segmentation
                 combined_mask = np.zeros((image.height, image.width), dtype=bool)
+                concept_masks = {}   # {concept: mask}
+                concept_scores = {}  # {concept: best_score}
 
                 for concept in concepts:
                     inputs = processor(
@@ -103,6 +105,9 @@ def main():
                         target_sizes=target_sizes,
                     )
 
+                    concept_mask = np.zeros((image.height, image.width), dtype=bool)
+                    best_score = 0.0
+
                     if results and len(results) > 0:
                         result = results[0]
                         if "masks" in result and len(result["masks"]) > 0:
@@ -113,11 +118,20 @@ def main():
                                     mask_np = mask_tensor.cpu().numpy().astype(bool)
                                     if mask_np.ndim == 3:
                                         mask_np = mask_np[0]
+                                    concept_mask |= mask_np
+                                    best_score = max(best_score, score)
                                     combined_mask |= mask_np
                                     print(f"[SAM3 Server] Concept '{concept}': score={score:.3f}")
 
-                # Save response
-                np.savez_compressed(response_file, mask=combined_mask)
+                    concept_masks[concept] = concept_mask
+                    concept_scores[concept] = best_score
+
+                # Save response with per-concept data
+                save_dict = {'mask': combined_mask}
+                for concept, cmask in concept_masks.items():
+                    save_dict[f'mask_{concept}'] = cmask
+                    save_dict[f'score_{concept}'] = np.array(concept_scores[concept])
+                np.savez_compressed(response_file, **save_dict)
                 print(f"[SAM3 Server] Done. Mask coverage: {combined_mask.sum() / combined_mask.size * 100:.1f}%")
 
             time.sleep(0.01)  # 10ms polling

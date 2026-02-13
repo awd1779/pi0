@@ -7,10 +7,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import gymnasium as gym
 import numpy as np
-from simpler_env.utils.env.observation_utils import get_image_from_maniskill2_obs_dict
-
 from src.cgvd.instruction_parser import InstructionParser
-from src.cgvd.sam3_segmenter import SAM3Segmenter, create_segmenter, get_sam3_segmenter
+from src.cgvd.sam3_segmenter import SAM3Segmenter, get_sam3_segmenter
 
 
 class CGVDWrapper(gym.Wrapper):
@@ -54,7 +52,13 @@ class CGVDWrapper(gym.Wrapper):
         lama_dilation: int = 11,
         safe_dilation: int = 5,
         cache_refresh_interval: int = 0,
-        # Distractor IoU suppression
+        # Safe-set robustness parameters
+        genuineness_margin: float = -0.1,
+        iou_gate_threshold: float = 0.15,
+        iou_gate_start_frame: int = 2,
+        min_component_pixels: int = 50,
+        overlap_penalty_cap: float = 0.7,
+        # Legacy (kept so callers don't break)
         distractor_iou_threshold: float = 0.15,
         # Ablation parameters
         disable_safeset: bool = False,
@@ -96,6 +100,9 @@ class CGVDWrapper(gym.Wrapper):
         """
         super().__init__(env)
 
+        if kwargs:
+            print(f"[CGVD] WARNING: Unknown parameters ignored: {list(kwargs.keys())}")
+
         # Configuration
         self.update_freq = update_freq
         self.presence_threshold = presence_threshold
@@ -109,8 +116,12 @@ class CGVDWrapper(gym.Wrapper):
         self.distractor_presence_threshold = distractor_presence_threshold
         self.safeset_warmup_frames = safeset_warmup_frames
         self.deferred_detection_frames = deferred_detection_frames
-        self.distractor_iou_threshold = distractor_iou_threshold
-
+        # Safe-set robustness parameters
+        self.genuineness_margin = genuineness_margin
+        self.iou_gate_threshold = iou_gate_threshold
+        self.iou_gate_start_frame = iou_gate_start_frame
+        self.min_component_pixels = min_component_pixels
+        self.overlap_penalty_cap = overlap_penalty_cap
         # Compositing parameters
         self.blend_sigma = blend_sigma
         self.lama_dilation = lama_dilation
@@ -153,14 +164,18 @@ class CGVDWrapper(gym.Wrapper):
         # State - masks
         self.cached_mask: Optional[np.ndarray] = None
         self.cached_distractor_mask: Optional[np.ndarray] = None  # Raw distractor mask before subtraction
-        self.cached_safe_mask: Optional[np.ndarray] = None  # Safe set mask (target + anchor + robot)
+        self.cached_safe_mask: Optional[np.ndarray] = None  # Combined safe set (derived: max(target, anchor))
+        self.cached_target_mask: Optional[np.ndarray] = None  # Target only (e.g., spoon)
+        self.cached_anchor_mask: Optional[np.ndarray] = None  # Anchor only (e.g., towel)
         self.cached_inpainted_image: Optional[np.ndarray] = None  # Cached inpainted background for compositing
         self.last_robot_mask: Optional[np.ndarray] = None  # Store robot mask for compositing
         self.cached_robot_mask: Optional[np.ndarray] = None  # Accumulated robot mask from warmup
-        self.last_distilled_image: Optional[np.ndarray] = None  # Previous frame's distilled output for robot detection
         self.current_safe_mask: Optional[np.ndarray] = None  # Per-frame safe mask (target + anchor + robot)
         self._target_detected_in_warmup: bool = False  # Whether the target specifically was detected during warmup
-        self._safe_mask_votes: Optional[np.ndarray] = None  # Per-pixel detection count during warmup
+        self._target_votes: Optional[np.ndarray] = None  # Per-pixel vote count for target
+        self._anchor_votes: Optional[np.ndarray] = None  # Per-pixel vote count for anchor
+        self._deferred_was_active: bool = False  # Whether deferred detection was ever active
+        self._deferred_cleanup_done: bool = False  # Whether post-deferred cleanup has run
 
         # State - confidence scores and individual masks for debug display
         self.distractor_scores: Dict[str, float] = {}
@@ -204,6 +219,49 @@ class CGVDWrapper(gym.Wrapper):
         if self.log_file:
             self.log_file.write(msg + "\n")
             self.log_file.flush()
+
+    def _hide_robot(self):
+        """Hide robot visual meshes so SAM3 sees unoccluded scene."""
+        try:
+            robot = self.env.unwrapped.agent.robot
+            for link in robot.get_links():
+                link.hide_visual()
+        except Exception as e:
+            self._log(f"[CGVD] Warning: could not hide robot: {e}")
+
+    def _show_robot(self):
+        """Restore robot visual meshes."""
+        try:
+            robot = self.env.unwrapped.agent.robot
+            for link in robot.get_links():
+                link.unhide_visual()
+        except Exception as e:
+            self._log(f"[CGVD] Warning: could not show robot: {e}")
+
+    def _render_robot_free_image(self, camera_name: str) -> np.ndarray:
+        """Re-render scene with robot hidden to get unoccluded view for SAM3.
+
+        Used during warmup so SAM3 sees the real target unoccluded by the
+        robot arm, preventing the spatula (fully visible) from winning top-1.
+
+        Args:
+            camera_name: Name of camera to render from (e.g. "overhead_camera")
+
+        Returns:
+            Robot-free image as uint8 RGB (H, W, 3)
+        """
+        self._hide_robot()
+        try:
+            scene = self.env.unwrapped._scene
+            scene.update_render()
+            camera = self.env.unwrapped._cameras[camera_name]
+            camera.take_picture()
+            images = camera.get_images()
+            color_rgba = images["Color"]  # float32 [0,1] (H, W, 4)
+            return (np.clip(color_rgba[..., :3], 0, 1) * 255).astype(np.uint8)
+        finally:
+            self._show_robot()
+            self.env.unwrapped._scene.update_render()
 
     def _filter_overlapping_detections(
         self,
@@ -253,31 +311,6 @@ class CGVDWrapper(gym.Wrapper):
                 self._log(f"[CGVD] Filtering '{name}' (score={score:.3f}) - keeping '{top_name}' (score={top_score:.3f})")
 
         return kept_masks, kept_scores
-
-    def _suppress_overlapping_distractors(
-        self,
-        distractor_masks: Dict[str, np.ndarray],
-        distractor_scores: Dict[str, float],
-        safe_mask: np.ndarray,
-        iou_threshold: float = 0.15,
-    ) -> Dict[str, np.ndarray]:
-        """Suppress distractor detections that overlap significantly with the safe-set."""
-        filtered = {}
-        for concept, mask in distractor_masks.items():
-            if mask.sum() == 0:
-                continue
-            intersection = np.logical_and(mask > 0.5, safe_mask > 0.5).sum()
-            mask_area = (mask > 0.5).sum()
-            if mask_area == 0:
-                continue
-            overlap = intersection / mask_area
-            if overlap > iou_threshold:
-                self._log(f"[CGVD] Suppressing distractor '{concept}' "
-                          f"(score={distractor_scores.get(concept, 0):.3f}, "
-                          f"overlap={overlap:.3f} > {iou_threshold})")
-            else:
-                filtered[concept] = mask
-        return filtered
 
     def _cross_validate_safeset(
         self,
@@ -354,7 +387,7 @@ class CGVDWrapper(gym.Wrapper):
             if name == best_name:
                 self._log(f"[CGVD] Cross-val: KEEPING '{name}' (genuineness={genuineness:.3f})")
                 continue
-            if genuineness < 0:  # More "distractor" than "target"
+            if genuineness < self.genuineness_margin:  # More "distractor" than "target"
                 self._log(f"[CGVD] Cross-val: removing '{name}' (genuineness={genuineness:.3f})")
                 if false_positive_mask is None:
                     false_positive_mask = mask.copy()
@@ -362,6 +395,122 @@ class CGVDWrapper(gym.Wrapper):
                     false_positive_mask = np.maximum(false_positive_mask, mask)
 
         return false_positive_mask
+
+    def _accumulate_target(self, target_mask: np.ndarray, in_deferred: bool = False):
+        """Accumulate a target detection with IoU spatial gating (Layer 2).
+
+        Args:
+            target_mask: Binary mask for this frame's target detection
+            in_deferred: Whether we're in deferred detection mode
+        """
+        new_binary = (target_mask > 0.5)
+        if new_binary.sum() < self.min_component_pixels:
+            return  # Too small to be meaningful
+
+        if self.cached_target_mask is None:
+            # First detection: initialize anchor
+            self.cached_target_mask = target_mask.copy()
+            self._target_votes = new_binary.astype(np.float32)
+            self._log("[CGVD] Layer 2: target anchor initialized")
+            return
+
+        # IoU gating: skip on early frames and during deferred detection
+        early_frame = self.frame_count < self.iou_gate_start_frame
+
+        if early_frame or in_deferred:
+            # Accumulate unconditionally
+            self.cached_target_mask = np.maximum(self.cached_target_mask, target_mask)
+            if self._target_votes is None:
+                self._target_votes = new_binary.astype(np.float32)
+            else:
+                self._target_votes += new_binary.astype(np.float32)
+            self._log(f"[CGVD] Layer 2: accumulated (ungated, frame={self.frame_count})")
+            return
+
+        # Compute IoU against TARGET-ONLY accumulated mask
+        existing_binary = (self.cached_target_mask > 0.5)
+        intersection = np.logical_and(new_binary, existing_binary).sum()
+        union_area = np.logical_or(new_binary, existing_binary).sum()
+        iou = float(intersection) / max(int(union_area), 1)
+
+        if iou > self.iou_gate_threshold:
+            self.cached_target_mask = np.maximum(self.cached_target_mask, target_mask)
+            self._target_votes += new_binary.astype(np.float32)
+            self._log(f"[CGVD] Layer 2: accumulated (IoU={iou:.3f})")
+        else:
+            self._log(f"[CGVD] Layer 2: REJECTED (IoU={iou:.3f} < {self.iou_gate_threshold})")
+
+    def _cleanup_target_mask(self):
+        """Post-warmup cleanup: keep only the best target component (Layer 3).
+
+        Runs on cached_target_mask ONLY (not anchor). Uses connected component
+        analysis to separate spatially disjoint detections, then scores each by
+        detection consistency and distractor contamination.
+        """
+        if self.cached_target_mask is None or self._target_votes is None:
+            return
+
+        binary = (self.cached_target_mask > 0.5).astype(np.uint8)
+
+        # Use 4-connectivity to reduce false merges from diagonally-adjacent masks
+        num_labels, labels = cv2.connectedComponents(binary, connectivity=4)
+
+        if num_labels <= 2:  # background + 1 component = nothing to clean
+            self._log(f"[CGVD] Layer 3: {num_labels - 1} component(s), no cleanup needed")
+            return
+
+        best_label = -1
+        best_score = -1.0
+
+        for label_id in range(1, num_labels):
+            component = (labels == label_id)
+            pixel_count = int(component.sum())
+
+            if pixel_count < self.min_component_pixels:
+                continue
+
+            # Average votes: how consistently was this region detected?
+            avg_votes = float(self._target_votes[component].mean())
+
+            # Distractor overlap: fraction of component covered by distractor mask
+            if self.cached_distractor_mask is not None:
+                dist_overlap = float(np.logical_and(
+                    component, self.cached_distractor_mask > 0.5
+                ).sum()) / max(pixel_count, 1)
+            else:
+                dist_overlap = 0.0
+
+            # Score: consistency * (1 - distractor contamination)
+            # Cap overlap penalty so co-located targets aren't over-penalized
+            overlap_penalty = min(dist_overlap, self.overlap_penalty_cap)
+            score = avg_votes * (1.0 - overlap_penalty)
+
+            self._log(f"[CGVD] Layer 3: component {label_id}: "
+                      f"pixels={pixel_count}, avg_votes={avg_votes:.1f}, "
+                      f"dist_overlap={dist_overlap:.2f}, score={score:.3f}")
+
+            if score > best_score:
+                best_score = score
+                best_label = label_id
+
+        if best_label > 0:
+            kept = (labels == best_label).astype(np.float32)
+            removed_pixels = int(binary.sum() - kept.sum())
+            if removed_pixels > 0:
+                self._log(f"[CGVD] Layer 3: keeping component {best_label} "
+                          f"(score={best_score:.3f}), removed {removed_pixels} pixels")
+                self.cached_target_mask = kept
+
+    def _recompute_cached_safe_mask(self, shape: Tuple[int, ...]):
+        """Recompute combined safe mask from per-concept masks.
+
+        Args:
+            shape: (H, W) shape for zero initialization
+        """
+        h, w = shape[:2]
+        target = self.cached_target_mask if self.cached_target_mask is not None else np.zeros((h, w), dtype=np.float32)
+        anchor = self.cached_anchor_mask if self.cached_anchor_mask is not None else np.zeros((h, w), dtype=np.float32)
+        self.cached_safe_mask = np.maximum(target, anchor)
 
     def reset(
         self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
@@ -382,13 +531,17 @@ class CGVDWrapper(gym.Wrapper):
         self.cached_mask = None
         self.cached_distractor_mask = None
         self.cached_safe_mask = None
+        self.cached_target_mask = None
+        self.cached_anchor_mask = None
         self.cached_inpainted_image = None
         self.last_robot_mask = None
         self.cached_robot_mask = None
-        self.last_distilled_image = None
         self.current_safe_mask = None
         self._target_detected_in_warmup = False
-        self._safe_mask_votes = None
+        self._target_votes = None
+        self._anchor_votes = None
+        self._deferred_was_active = False
+        self._deferred_cleanup_done = False
         self.distractor_scores = {}
         self.safe_scores = {}
         self.frame_count = 0
@@ -518,6 +671,7 @@ class CGVDWrapper(gym.Wrapper):
         # Step 2: Distractor mask - accumulate during warm-up period
         # Stricter threshold reduces false positives (carrot detected as banana)
         seg_start = time.time()
+        safe_query_image = image  # default; overridden with robot-free image during warmup
         distractor_concepts = ". ".join(self.distractor_names)
 
         # Determine if we should recompute distractor mask
@@ -579,34 +733,55 @@ class CGVDWrapper(gym.Wrapper):
                     self.current_anchor,
                     include_robot=False,  # Robot tracked separately
                 )
+
+                # During warmup, hide robot and re-render so SAM3 sees the
+                # real target unoccluded.  Without this, the robot arm over
+                # the real spoon suppresses its SAM3 score, letting the
+                # spatula (fully visible) win top-1 and lock into the
+                # safe-set.
+                if in_warmup:
+                    safe_query_image = self._render_robot_free_image(camera_name)
+                    self._log("[CGVD] Using robot-free image for safe-set query")
+                else:
+                    safe_query_image = image
+
                 raw_target_mask = self.segmenter.segment(
-                    image, safe_concepts, presence_threshold=self.presence_threshold
+                    safe_query_image, safe_concepts, presence_threshold=self.presence_threshold
                 )
                 self.safe_scores = self.segmenter.last_scores.copy()
                 self.safe_individual_masks = self.segmenter.last_individual_masks.copy()
 
-                # Keep only top-scoring instance per concept (e.g., highest-scoring "spoon").
-                # The real target typically scores higher than false positives (e.g., spatula
-                # misdetected as "spoon" with 0.72 vs real spoon at 0.87). Top-1 filtering
-                # prevents the false positive from entering the safe-set, which would create
-                # a hole in the distractor mask where the spatula should be inpainted away.
-                # Combined with majority voting across warmup frames, this is robust even
-                # if top-1 occasionally picks the wrong instance on a single frame.
+                # Layer 1: Cross-validate BEFORE top-1 (on full multi-instance set).
+                # With 2+ instances (e.g., spoon_0=real, spoon_1=spatula), cross-val
+                # can remove the false positive before top-1 picks the wrong one.
+                fp_mask = self._cross_validate_safeset(
+                    self.safe_individual_masks, self.safe_scores,
+                    self.distractor_individual_masks, self.distractor_scores,
+                )
+                if fp_mask is not None:
+                    for name in list(self.safe_individual_masks.keys()):
+                        base = name.rsplit('_', 1)[0] if '_' in name and name.rsplit('_', 1)[1].isdigit() else name
+                        if base == self.current_target:
+                            cleaned = np.clip(self.safe_individual_masks[name] - fp_mask, 0.0, 1.0)
+                            if (cleaned > 0.5).sum() < self.min_component_pixels:
+                                del self.safe_individual_masks[name]
+                                del self.safe_scores[name]
+                                self._log(f"[CGVD] Layer 1: removed instance '{name}' (below {self.min_component_pixels}px after cross-val)")
+                            else:
+                                self.safe_individual_masks[name] = (cleaned > 0.5).astype(np.float32)
+
+                # Top-1 filter: keep only highest-scoring instance per concept
+                # (now operating on the cross-val-cleaned set)
                 filtered_masks, filtered_scores = self._filter_overlapping_detections(
                     self.safe_individual_masks, self.safe_scores
                 )
-                raw_target_mask = np.zeros_like(raw_target_mask)
-                for m in filtered_masks.values():
-                    raw_target_mask = np.maximum(raw_target_mask, m)
                 self.safe_individual_masks = filtered_masks
                 self.safe_scores = filtered_scores
 
-                # Always log scores to file (if enabled), print only if verbose
                 scores_str = ", ".join(f"{k}={v:.3f}" for k, v in self.safe_scores.items())
                 self._log(f"[CGVD] Frame {self.frame_count} Safe-set scores (filtered): {scores_str}")
 
                 # Track whether the target specifically was detected during warmup.
-                # Keys can be "spoon" (single) or "spoon_0", "spoon_1" (multi-instance).
                 if not self._target_detected_in_warmup and self.current_target:
                     for key, score in self.safe_scores.items():
                         base = key.rsplit('_', 1)[0] if '_' in key and key.rsplit('_', 1)[1].isdigit() else key
@@ -616,44 +791,59 @@ class CGVDWrapper(gym.Wrapper):
                             self._log(f"[CGVD] Target '{self.current_target}' detected in {phase} (key='{key}', score={score:.3f})")
                             break
 
-                if self.cached_safe_mask is None:
-                    # First frame: initialize
-                    self.cached_safe_mask = raw_target_mask
-                    self._safe_mask_votes = (raw_target_mask > 0.5).astype(np.float32)
-                else:
-                    # Warm-up frames: accumulate (union of all detections)
-                    self.cached_safe_mask = np.maximum(self.cached_safe_mask, raw_target_mask)
-                    if self._safe_mask_votes is None:
-                        self._safe_mask_votes = (raw_target_mask > 0.5).astype(np.float32)
+                # Track deferred detection activity
+                if in_deferred:
+                    self._deferred_was_active = True
+
+                # Split by concept and accumulate per-concept
+                for name, mask in filtered_masks.items():
+                    base = name.rsplit('_', 1)[0] if '_' in name and name.rsplit('_', 1)[1].isdigit() else name
+                    if base == self.current_target:
+                        self._accumulate_target(mask, in_deferred)
                     else:
-                        self._safe_mask_votes += (raw_target_mask > 0.5).astype(np.float32)
+                        # Anchor: accumulate unconditionally (never filtered)
+                        if self.cached_anchor_mask is None:
+                            self.cached_anchor_mask = mask.copy()
+                            self._anchor_votes = (mask > 0.5).astype(np.float32)
+                        else:
+                            self.cached_anchor_mask = np.maximum(self.cached_anchor_mask, mask)
+                            self._anchor_votes += (mask > 0.5).astype(np.float32)
 
-                # Cross-validate for logging only (keep diagnostic info).
-                # Top-1 filtering handles false positive rejection.
-                fp_mask = self._cross_validate_safeset(
-                    self.safe_individual_masks, self.safe_scores,
-                    self.distractor_individual_masks, self.distractor_scores,
-                )
+                # Recompute combined safe mask from per-concept masks
+                self._recompute_cached_safe_mask(raw_target_mask.shape)
 
-                # On last warmup frame, log vote statistics for diagnostics.
-                # Safe-set uses union accumulation (np.maximum) — robust to SAM3
-                # detection gaps. Top-1 filtering handles false positive rejection.
+                # On last warmup frame: run Layer 3 cleanup and log stats
                 is_last_warmup = in_warmup and (self.frame_count == self.safeset_warmup_frames - 1)
-                if is_last_warmup and self._safe_mask_votes is not None:
-                    union_pixels = int((self.cached_safe_mask > 0.5).sum())
-                    max_votes = int(self._safe_mask_votes.max())
-                    self._log(f"[CGVD] Safe-set finalized: {union_pixels} pixels "
-                              f"(union of {self.safeset_warmup_frames} frames, max_votes={max_votes})")
+                if is_last_warmup:
+                    if self._target_votes is not None:
+                        union_pixels = int((self.cached_target_mask > 0.5).sum()) if self.cached_target_mask is not None else 0
+                        max_votes = int(self._target_votes.max())
+                        self._log(f"[CGVD] Target mask before cleanup: {union_pixels} pixels "
+                                  f"(union of {self.safeset_warmup_frames} frames, max_votes={max_votes})")
+                    self._cleanup_target_mask()
+                    self._recompute_cached_safe_mask(raw_target_mask.shape)
+
+                # Post-deferred cleanup: run once when deferred window expires
+                is_deferred_end = (
+                    not in_warmup and not in_deferred
+                    and self._deferred_was_active
+                    and not self._deferred_cleanup_done
+                )
+                if is_deferred_end:
+                    self._log("[CGVD] Running post-deferred cleanup")
+                    self._cleanup_target_mask()
+                    self._recompute_cached_safe_mask(raw_target_mask.shape)
+                    self._deferred_cleanup_done = True
 
                 if self.verbose:
-                    cov = self.cached_safe_mask.sum() / self.cached_safe_mask.size * 100
+                    cov = self.cached_safe_mask.sum() / self.cached_safe_mask.size * 100 if self.cached_safe_mask is not None else 0
                     status = "accumulating" if in_warmup else ("deferred" if in_deferred else "frozen")
                     print(f"[CGVD] Safe-set mask: {cov:.1f}% (frame {self.frame_count}, {status})")
 
             # Step 3b: Robot mask - tracked every frame
             if self.include_robot:
                 robot_concepts = "robot arm. robot gripper"
-                robot_image = self.last_distilled_image if self.last_distilled_image is not None else image
+                robot_image = image
                 robot_mask = self.segmenter.segment(
                     robot_image, robot_concepts, presence_threshold=self.robot_presence_threshold
                 )
@@ -670,12 +860,6 @@ class CGVDWrapper(gym.Wrapper):
                     print(f"[CGVD] Robot mask (threshold={self.robot_presence_threshold}): {robot_mask.sum() / robot_mask.size * 100:.1f}%")
             else:
                 safe_mask = self.cached_safe_mask
-
-            # Note: Pre-suppression of overlapping distractors removed.
-            # The final mask formula (distractor AND NOT safe) at Step 4 already
-            # gates distractors by the safe-set. Pre-suppression was removing
-            # distractors from the mask before they reached the final gating,
-            # causing them to show through untouched.
 
         self.current_safe_mask = safe_mask
 
@@ -722,6 +906,25 @@ class CGVDWrapper(gym.Wrapper):
         # The VLA never sees warmup frames — they are consumed internally by
         # reset() which steps the env with no-op actions.
         if self.frame_count <= self.safeset_warmup_frames:
+            # On the LAST warmup frame, pre-compute the clean plate using the
+            # real image (with robot) + full inpaint mask (distractors + robot).
+            # We use the real image rather than the robot-free render because
+            # SAPIEN's IBL renderer recomputes lighting when the robot is hidden,
+            # causing a global color shift that creates visible seams at
+            # distractor boundaries during compositing.  The robot-free image
+            # is still used for SAM3 queries where color accuracy is irrelevant.
+            if (self.frame_count == self.safeset_warmup_frames
+                    and not self.disable_inpaint
+                    and self.inpainter is not None):
+                cache_mask = self._build_inpaint_mask()
+                self.cached_inpainted_image = self.inpainter.inpaint(
+                    image, cache_mask, dilate_mask=0
+                )
+                self.last_lama_time = self.inpainter.last_inpaint_time
+                self.total_lama_time += self.last_lama_time
+                self._log("[CGVD] Pre-computed clean plate from real image (last warmup frame)")
+            if self.save_debug_images:
+                self._save_debug_images(image, self.cached_mask, safe_query_image)
             self.last_cgvd_time = time.time() - cgvd_start
             self.total_cgvd_time += self.last_cgvd_time
             return obs
@@ -742,18 +945,10 @@ class CGVDWrapper(gym.Wrapper):
             )
 
         # Apply visual distillation to remove distractors
+        # Clean plate is pre-computed during warmup from the real image.
         if self.disable_inpaint:
             # Ablation: Mean-color fill instead of inpainting
             distilled = self._apply_mean_fill(image, self.cached_mask)
-        elif self.cached_inpainted_image is None:
-            # First frame: clean-plate: inpaint distractors + robot + safe-set
-            cache_mask = self._build_inpaint_mask()
-            self.cached_inpainted_image = self.inpainter.inpaint(image, cache_mask, dilate_mask=0)
-            # For frame 0: composite non-distractor regions from current frame
-            # This shows current frame everywhere EXCEPT distractor regions (which show inpainted background)
-            distilled = self._composite(image, self.cached_inpainted_image, self.cached_mask)
-            if self.verbose:
-                print(f"[CGVD] Cached inpainted background (frame {self.frame_count})")
         else:
             # Periodic refresh of cached background (disabled by default,
             # cached_mask is stable so refresh only causes visual jumps)
@@ -774,7 +969,6 @@ class CGVDWrapper(gym.Wrapper):
         # Write distilled image back to observation
         # IMPORTANT: Write to the SAME camera we read from (camera_name)
         obs = self._write_image_to_obs(obs, distilled, camera_name)
-        self.last_distilled_image = distilled.copy()
 
         # Save debug images if enabled
         if self.save_debug_images:
@@ -785,10 +979,9 @@ class CGVDWrapper(gym.Wrapper):
         self.total_cgvd_time += self.last_cgvd_time
 
         # Get component timing from segmenter and inpainter
-        if hasattr(self.segmenter, 'last_segment_time'):
-            self.last_sam3_time = self.segmenter.last_segment_time
-            self.total_sam3_time += self.last_sam3_time
-        if self.inpainter is not None and hasattr(self.inpainter, 'last_inpaint_time'):
+        self.last_sam3_time = self.segmenter.last_segment_time
+        self.total_sam3_time += self.last_sam3_time
+        if self.inpainter is not None:
             self.last_lama_time = self.inpainter.last_inpaint_time
             self.total_lama_time += self.last_lama_time
 
@@ -848,42 +1041,12 @@ class CGVDWrapper(gym.Wrapper):
                 feathered = np.maximum(feathered, non_safe_distractor)
 
             # Re-enforce safe-set pixels so they always show the live frame.
-            # Binarize robot contribution (>0.5) to prevent SAM3 boundary fuzz
-            # from partially zeroing feathered at nearby distractor pixels.
-            # This gives the robot a crisp boundary that cleanly punches through
-            # distractor regions without creating an indeterminate halo.
+            # safe (binarized) includes target+anchor+robot from SAM3; binary_target
+            # (dilated) provides extra halo protection for the stationary target/anchor.
+            # Robot uses raw SAM3 mask — re-enforcement shows the live frame directly,
+            # so the 1-2px SAM3 boundary under-segmentation is imperceptible.
             if safe is not None:
-                robot_contrib = np.clip(safe - binary_target, 0.0, 1.0)
-                robot_binary = (robot_contrib > 0.5).astype(np.float32)
-                # Dilate robot re-enforcement beyond cached_mask boundary by ~2σ of
-                # blend_sigma so GaussianBlur feathered values are negligible (<2%)
-                # at the re-enforcement edge, eliminating robot-color halo.
-                if self.safe_dilation > 0 and robot_binary.max() > 0:
-                    _robot_kern = np.ones((self._reinforce_size, self._reinforce_size), np.uint8)
-                    robot_binary_dilated = cv2.dilate(
-                        robot_binary.astype(np.uint8), _robot_kern, iterations=1
-                    ).astype(np.float32)
-                else:
-                    robot_binary_dilated = robot_binary
-
-                # In distractor zones: use raw binarized robot mask.
-                # Previously used eroded mask to strip SAM3 boundary false positives,
-                # but the ~2px erosion gap lets Mechanism 2 force feathered=1.0 at the
-                # robot boundary, showing clean plate (table texture) instead of the
-                # live robot — creating a visible halo. Raw binarized mask (thresholded
-                # at >0.5) is sufficient to filter low-confidence SAM3 boundary pixels.
-                if self.cached_distractor_mask is not None:
-                    distractor_zone = (self.cached_distractor_mask > 0.5).astype(np.float32)
-                    non_distractor = 1.0 - distractor_zone
-
-                    # Outside distractors: dilated (halo elimination)
-                    # Inside distractors: raw binarized (no erosion gap)
-                    robot_binary_dilated = (
-                        robot_binary_dilated * non_distractor
-                        + robot_binary * distractor_zone
-                    )
-
-                reinforce_mask = np.maximum(binary_target, robot_binary_dilated)
+                reinforce_mask = np.maximum(safe, binary_target)
                 feathered = feathered * (1.0 - reinforce_mask)
 
             feathered_3d = feathered[..., None]

@@ -169,7 +169,9 @@ class SAM3Segmenter:
         if results and len(results) > 0:
             result = results[0]
             if "masks" in result and len(result["masks"]) > 0:
-                scores = result.get("scores", torch.ones(len(result["masks"])))
+                if "scores" not in result:
+                    raise KeyError("SAM3 post_process returned no 'scores' — check transformers version")
+                scores = result["scores"]
 
                 for i in range(len(result["masks"])):
                     mask_tensor = result["masks"][i]
@@ -274,39 +276,6 @@ class SAM3Segmenter:
 
         return combined_mask
 
-    def segment_with_fallback(
-        self,
-        image: np.ndarray,
-        concepts: str,
-        fallback_to_full: bool = True,
-    ) -> np.ndarray:
-        """Segment with fallback behavior for failed detections.
-
-        If no concepts are detected (hallucination check fails for all),
-        this method can either return a blank mask or a full mask.
-
-        Args:
-            image: Input RGB image
-            concepts: Dot-separated concept string
-            fallback_to_full: If True, return full mask on detection failure
-                             If False, return blank mask (safer for unknown scenes)
-
-        Returns:
-            Binary mask, shape (H, W)
-        """
-        mask = self.segment(image, concepts)
-
-        # Check if we got any valid detections
-        if mask.sum() < 100:  # Less than 100 pixels = likely failed
-            h, w = image.shape[:2]
-            if fallback_to_full:
-                # Return full mask - don't blur anything
-                return np.ones((h, w), dtype=np.float32)
-            else:
-                # Return blank mask - blur everything
-                return np.zeros((h, w), dtype=np.float32)
-
-        return mask
 
 
 class MockSAM3Segmenter:
@@ -319,6 +288,7 @@ class MockSAM3Segmenter:
     def __init__(self, presence_threshold: float = 0.4, **kwargs):
         self.presence_threshold = presence_threshold
         self.last_scores = {}  # Mock scores
+        self.last_individual_masks = {}  # Mock individual masks
         self.last_segment_time: float = 0.0  # Timing instrumentation
 
     def segment(
@@ -359,13 +329,6 @@ class MockSAM3Segmenter:
             return mask, {}
         return mask
 
-    def segment_with_fallback(
-        self,
-        image: np.ndarray,
-        concepts: str,
-        fallback_to_full: bool = True,
-    ) -> np.ndarray:
-        return self.segment(image, concepts)
 
 
 class SAM3ClientSegmenter:
@@ -389,6 +352,7 @@ class SAM3ClientSegmenter:
         self.comm_dir = Path(comm_dir)
         self.timeout = timeout
         self.last_scores = {}
+        self.last_individual_masks = {}
         self.last_segment_time: float = 0.0  # Timing instrumentation
         self._check_server()
 
@@ -464,7 +428,6 @@ class SAM3ClientSegmenter:
             for attempt in range(max_retries):
                 try:
                     data = np.load(response_file)
-                    mask = data['mask']
                     break
                 except EOFError:
                     if attempt < max_retries - 1:
@@ -472,11 +435,35 @@ class SAM3ClientSegmenter:
                     else:
                         raise
 
-            if 'error' in data.files and 'error' in data:
-                print(f"[SAM3 Client] Server error: {data['error']}")
+            if 'error' in data.files:
+                raise RuntimeError(f"SAM3 server error: {data['error']}")
+
+            if 'mask' not in data.files:
+                raise RuntimeError(f"SAM3 server response missing 'mask' key. Keys: {list(data.files)}")
+            mask = data['mask']
+
+            # Parse per-concept masks and scores from server response
+            concept_list = self._parse_concepts(concepts)
+            self.last_scores = {}
+            self.last_individual_masks = {}
+            for concept in concept_list:
+                score_key = f'score_{concept}'
+                mask_key = f'mask_{concept}'
+                if score_key in data.files and mask_key in data.files:
+                    self.last_scores[concept] = float(data[score_key])
+                    self.last_individual_masks[concept] = data[mask_key].astype(np.float32)
+                else:
+                    # Fallback for old server that doesn't send per-concept data
+                    self.last_scores[concept] = 1.0 if mask.any() else 0.0
+                    self.last_individual_masks[concept] = mask.astype(np.float32)
 
             if verbose:
                 print(f"[SAM3 Client] Mask coverage: {mask.sum() / mask.size * 100:.1f}%")
+                for concept in concept_list:
+                    score = self.last_scores.get(concept, 0.0)
+                    cmask = self.last_individual_masks.get(concept)
+                    cov = cmask.sum() / cmask.size * 100 if cmask is not None else 0.0
+                    print(f"[SAM3 Client] Concept '{concept}': score={score:.3f}, coverage={cov:.1f}%")
 
             self.last_segment_time = time.time() - start_time
 
@@ -486,13 +473,6 @@ class SAM3ClientSegmenter:
             # Cleanup temp file
             os.unlink(image_path)
 
-    def segment_with_robot(
-        self,
-        image: np.ndarray,
-        concepts: str,
-        fallback_to_full: bool = True,
-    ) -> np.ndarray:
-        return self.segment(image, concepts)
 
 
 # Module-level singleton instances for sharing across CGVDWrapper instances
@@ -552,26 +532,3 @@ def clear_sam3_singleton():
     _mock_singleton = None
 
 
-def create_segmenter(
-    use_mock: bool = False,
-    use_server: bool = False,
-    **kwargs,
-) -> SAM3Segmenter:
-    """Factory function to create appropriate segmenter.
-
-    Note: This creates a NEW instance each time. For shared instances
-    that persist across CGVDWrapper instances, use get_sam3_segmenter() instead.
-
-    Args:
-        use_mock: If True, return mock segmenter for testing
-        use_server: If True, use SAM3 client to connect to server
-        **kwargs: Arguments passed to segmenter constructor
-
-    Returns:
-        SAM3Segmenter, SAM3ClientSegmenter, or MockSAM3Segmenter instance
-    """
-    if use_mock:
-        return MockSAM3Segmenter(**kwargs)
-    if use_server:
-        return SAM3ClientSegmenter(**kwargs)
-    return SAM3Segmenter(**kwargs)

@@ -11,8 +11,7 @@ def _get_shape_local_pose(shape):
         return shape.local_pose
     if hasattr(shape, 'get_local_pose'):
         return shape.get_local_pose()
-    # Identity pose fallback
-    return sapien.Pose()
+    raise AttributeError(f"Shape {shape} has no local_pose or get_local_pose()")
 
 
 def _transform_points_by_pose(points, pose):
