@@ -77,10 +77,16 @@ RUN pip install --no-cache-dir -e /app/allenzren_SimplerEnv && \
 
 # ---------- Environment variables ----------
 ENV TRANSFORMERS_CACHE=/workspace/cache/transformers
+ENV HF_HOME=/workspace/cache/huggingface
 ENV VLA_LOG_DIR=/app/open-pi-zero/logs
 ENV VLA_WANDB_ENTITY=none
 ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
 ENV __GLX_VENDOR_LIBRARY_NAME=nvidia
+
+# ---------- PaliGemma tokenizer (gated model, baked in to avoid HF login) ----------
+# Stored under /app/ (safe from RunPod /workspace volume mount overlay).
+# start.sh copies to /workspace/cache/transformers/ on first boot.
+COPY docker/paligemma-3b-pt-224/ /app/paligemma-3b-pt-224/
 
 # ---------- Symlink checkpoints/logs to /workspace for persistence ----------
 # RunPod mounts a volume at /workspace that persists across restarts.
@@ -90,6 +96,10 @@ RUN rm -rf /app/open-pi-zero/checkpoints /app/open-pi-zero/logs && \
     ln -sf /workspace/checkpoints /app/open-pi-zero/checkpoints && \
     ln -sf /workspace/logs /app/open-pi-zero/logs
 
+# ---------- Startup script (auto-downloads checkpoint on first boot) ----------
+COPY docker/start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
 # ---------- Entrypoint ----------
 WORKDIR /app/open-pi-zero
-CMD ["sleep", "infinity"]
+CMD ["/app/start.sh"]

@@ -10,9 +10,10 @@
                 ▼
 ┌─ RunPod GPU Pod ─────────────────────────┐
 │  3. Launch pod with your image            │
-│  4. Download checkpoint from HuggingFace  │
-│  5. Run evaluation sweep                  │
-│  6. Download results                      │
+│  4. Connect to the pod                    │
+│  5. Checkpoint auto-downloads on boot     │
+│  6. Run evaluation sweep                  │
+│  7. Download results                      │
 └───────────────────────────────────────────┘
 ```
 
@@ -112,22 +113,15 @@ From the RunPod console, click your pod → **"Connect"**:
 
 ---
 
-## Step 5: Download the checkpoint
+## Step 5: Checkpoint (auto-downloaded)
 
-Inside the pod terminal:
+The **Bridge-Beta checkpoint** (~11 GB) is automatically downloaded to `/workspace/checkpoints/bridge_beta.pt` on first boot. Check the pod logs to monitor progress. On subsequent restarts, it's skipped since `/workspace` persists.
 
-```bash
-mkdir -p /workspace/open-pi-zero/checkpoints
-cd /workspace/open-pi-zero/checkpoints
-
-# Bridge-Beta checkpoint (~11 GB)
-wget https://huggingface.co/allenzren/open-pi-zero/resolve/main/bridge_beta_step19296_2024-12-26_22-30_42.pt \
-  -O bridge_beta.pt
-```
-
-Other available checkpoints:
+To download other checkpoints manually:
 
 ```bash
+cd /workspace/checkpoints
+
 # Bridge-Uniform
 wget https://huggingface.co/allenzren/open-pi-zero/resolve/main/bridge_uniform_step19296_2024-12-26_22-31_42.pt \
   -O bridge_uniform.pt
@@ -140,8 +134,6 @@ wget https://huggingface.co/allenzren/open-pi-zero/resolve/main/fractal_beta_ste
 wget https://huggingface.co/allenzren/open-pi-zero/resolve/main/fractal_uniform_step29576_2024-12-31_22-26_42.pt \
   -O fractal_uniform.pt
 ```
-
-If you're using a **Network Volume**, the checkpoint persists across pod restarts — you only download once.
 
 ---
 

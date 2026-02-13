@@ -40,7 +40,6 @@ import torch
 from omegaconf import OmegaConf
 
 from src.model.vla.pizero import PiZeroInference
-from src.utils.monitor import log_allocated_gpu_memory
 
 
 # Global settings for recording (set by BatchEvaluator)
@@ -189,9 +188,7 @@ class BatchEvaluator:
             raise ValueError(f"Unknown checkpoint type: {checkpoint_path}")
 
         # Load model ONCE
-        print("\n" + "=" * 70)
-        print("BATCH EVALUATOR: Loading model (shared across all configurations)")
-        print("=" * 70)
+        print("Loading model...", end=" ", flush=True)
         model_load_start = time.time()
 
         self.model = PiZeroInference(self.cfg, use_ddp=False)
@@ -205,8 +202,7 @@ class BatchEvaluator:
 
         self.model.eval()
         self.model_load_time = time.time() - model_load_start
-        print(f"Model loaded in {self.model_load_time:.2f}s")
-        log_allocated_gpu_memory(None, "loading model", self.gpu_id)
+        print(f"done ({self.model_load_time:.1f}s)")
 
         # Create attention capture if enabled
         self.attention_capture = None
@@ -222,7 +218,6 @@ class BatchEvaluator:
         data = torch.load(self.checkpoint_path, weights_only=True, map_location="cpu")
         data["model"] = {k.replace("_orig_mod.", ""): v for k, v in data["model"].items()}
         self.model.load_state_dict(data["model"], strict=True)
-        print(f"Loaded model from {self.checkpoint_path}")
 
     def _create_env(self, config: EvalConfig, use_cgvd: bool = False, output_dir: Optional[str] = None):
         """Create environment for a configuration."""
@@ -352,11 +347,7 @@ class BatchEvaluator:
                 img = pixel_values[0].permute(1, 2, 0).numpy()
                 img = ((img - img.min()) / (img.max() - img.min() + 1e-8) * 255).astype(np.uint8)
                 attn_path = os.path.join(output_dir, f"attention_{task}_{category}_{mode}_ep{episode_idx}.png")
-                saved = self.attention_capture.save_attention_map(img, attn_path)
-                if saved:
-                    print(f"  [Attention] Saved: {attn_path}")
-                else:
-                    print(f"  [Attention] Failed to save (no attention captured). Hooks: {len(self.attention_capture.hooks)}")
+                self.attention_capture.save_attention_map(img, attn_path)
                 self.attention_capture.clear()
 
             env_actions = self.env_adapter.postprocess(actions[0].float().cpu().numpy())
@@ -470,8 +461,6 @@ class BatchEvaluator:
         np.random.seed(config.seed)
         torch.manual_seed(config.seed)
 
-        print(f"\n--- Config: {config.task} | {config.category} | {config.num_distractors} distractors | seed={config.seed} ---")
-
         # Create run directory within the config directory
         # Structure: config_output_dir/run_{idx}/
         run_dir = None
@@ -492,7 +481,7 @@ class BatchEvaluator:
         if baseline_output:
             os.makedirs(baseline_output, exist_ok=True)
 
-        print(f"  [Baseline] Running {config.num_episodes} episodes...")
+        print(f"  Baseline: ", end="", flush=True)
         env = self._create_env(config, use_cgvd=False, output_dir=baseline_output)
         for ep_idx in range(config.num_episodes):
             result = self._run_episode(
@@ -504,11 +493,12 @@ class BatchEvaluator:
                 use_cgvd=False,
             )
             baseline_results.append(result)
-            status = "SUCCESS" if result.success else "FAILED"
-            log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode})"
+            print("+" if result.success else "-", end="", flush=True)
+            log_line = f"Episode {ep_idx+1}: {'SUCCESS' if result.success else 'FAILED'} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode})"
             baseline_log_lines.append(log_line)
-            print(f"    {log_line}")
         env.close()
+        b_ok = sum(1 for r in baseline_results if r.success)
+        print(f" {b_ok}/{config.num_episodes} ({b_ok/config.num_episodes*100:.0f}%)")
 
         # Run CGVD (only if distractors specified)
         if config.cgvd_distractor_names:
@@ -516,7 +506,7 @@ class BatchEvaluator:
             if cgvd_output:
                 os.makedirs(cgvd_output, exist_ok=True)
 
-            print(f"  [CGVD] Running {config.num_episodes} episodes...")
+            print(f"  CGVD:     ", end="", flush=True)
             env = self._create_env(config, use_cgvd=True, output_dir=cgvd_output)
             for ep_idx in range(config.num_episodes):
                 result = self._run_episode(
@@ -528,13 +518,13 @@ class BatchEvaluator:
                     use_cgvd=True,
                 )
                 cgvd_results.append(result)
-                status = "SUCCESS" if result.success else "FAILED"
-                log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode}, cgvd={result.cgvd_time:.2f}s)"
+                print("+" if result.success else "-", end="", flush=True)
+                log_line = f"Episode {ep_idx+1}: {'SUCCESS' if result.success else 'FAILED'} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode}, cgvd={result.cgvd_time:.2f}s)"
                 cgvd_log_lines.append(log_line)
-                print(f"    {log_line}")
             env.close()
+            c_ok = sum(1 for r in cgvd_results if r.success)
+            print(f" {c_ok}/{config.num_episodes} ({c_ok/config.num_episodes*100:.0f}%)")
         else:
-            print(f"  [CGVD] Skipped (no distractors)")
             cgvd_results = baseline_results  # Copy baseline results if no distractors
 
         # Save log files
@@ -559,8 +549,6 @@ class BatchEvaluator:
             baseline_results=baseline_results,
             cgvd_results=cgvd_results,
         )
-
-        print(f"  Results: Baseline={result.baseline_rate:.1f}%, CGVD={result.cgvd_rate:.1f}%, Δ={result.improvement:+.1f}%")
 
         return result
 
@@ -827,9 +815,10 @@ class BatchEvaluator:
         config_results: Dict[Tuple[str, int], List[ConfigResult]] = {}
 
         for i, config in enumerate(configs):
-            print(f"\n{'='*70}")
-            print(f"Configuration {i+1}/{total}")
-            print(f"{'='*70}")
+            elapsed = time.time() - start_time
+            rate = (i) / elapsed if elapsed > 0 and i > 0 else 0
+            eta = f", ~{(total - i) / rate / 60:.0f}m left" if rate > 0 else ""
+            print(f"\n[{i+1}/{total}] {config.category} | {config.num_distractors} dist | seed={config.seed} ({elapsed/60:.1f}m{eta})")
 
             # Get pre-computed output directory
             key = (config.category, config.num_distractors)
@@ -848,12 +837,6 @@ class BatchEvaluator:
                 expected_runs = sum(1 for c in configs if (c.category, c.num_distractors) == key)
                 if len(config_results[key]) == expected_runs:
                     self._save_aggregated_report(config_results[key], config_output_dir)
-
-            # Progress update
-            elapsed = time.time() - start_time
-            rate = (i + 1) / elapsed if elapsed > 0 else 0
-            remaining = (total - i - 1) / rate if rate > 0 else 0
-            print(f"  Progress: {i+1}/{total} ({elapsed/60:.1f}m elapsed, ~{remaining/60:.1f}m remaining)")
 
 
 def load_distractors_from_file(filepath: str, category: str, num_distractors: int) -> Tuple[List[str], List[str]]:
@@ -877,7 +860,7 @@ def load_distractors_from_file(filepath: str, category: str, num_distractors: in
         if categorized.exists():
             file_to_use = categorized
         else:
-            print(f"Warning: No distractors file found for {filepath} / {category}")
+            print(f"WARNING: No distractors file: {filepath}")
             return [], []
 
     # Read distractors
@@ -966,8 +949,15 @@ def save_sweep_results(results: List[ConfigResult], output_dir: str):
     """Save sweep results to files."""
     os.makedirs(output_dir, exist_ok=True)
 
+    # Build filename prefix from task + categories present in results
+    tasks = sorted(set(r.config.task for r in results))
+    categories = sorted(set(r.config.category for r in results))
+    task_str = "_".join(tasks)
+    cat_str = "_".join(categories)
+    prefix = f"{task_str}_{cat_str}" if cat_str else task_str
+
     # Summary CSV with new metrics
-    summary_path = os.path.join(output_dir, "sweep_summary.csv")
+    summary_path = os.path.join(output_dir, f"sweep_summary_{prefix}.csv")
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("task,category,num_distractors,run,seed,baseline_rate,cgvd_rate,improvement,"
                 "baseline_hard_sr,cgvd_hard_sr,hard_improvement,"
@@ -1004,7 +994,7 @@ def save_sweep_results(results: List[ConfigResult], output_dir: str):
                    f"{avg_cgvd:.3f},{avg_sam3:.3f},{avg_lama:.3f}\n")
 
     # Detailed JSON with new metrics
-    json_path = os.path.join(output_dir, "sweep_results.json")
+    json_path = os.path.join(output_dir, f"sweep_results_{prefix}.json")
     json_results = []
     for r in results:
         json_results.append({
@@ -1073,15 +1063,13 @@ def save_sweep_results(results: List[ConfigResult], output_dir: str):
         json.dump(json_results, f, indent=2)
 
     print(f"\nResults saved to: {output_dir}")
-    print(f"  - {summary_path}")
-    print(f"  - {json_path}")
 
 
 def print_sweep_summary(results: List[ConfigResult]):
     """Print summary of sweep results."""
-    print("\n" + "=" * 120)
-    print("SWEEP SUMMARY")
-    print("=" * 120)
+    print("\n" + "=" * 90)
+    print("SUMMARY")
+    print("=" * 90)
 
     # Group by category and num_distractors
     from collections import defaultdict
@@ -1090,59 +1078,25 @@ def print_sweep_summary(results: List[ConfigResult]):
         key = (r.config.category, r.config.num_distractors)
         grouped[key].append(r)
 
-    print(f"\n{'Category':<12} {'Dist':<6} {'Runs':<6} {'Baseline SR':<12} {'CGVD SR':<12} {'Δ SR':<8} {'h-SR(B)':<8} {'h-SR(C)':<8} {'Δ h-SR':<8} {'CGVD-T':<8}")
-    print("-" * 120)
+    print(f"{'Category':<12} {'Dist':<6} {'Runs':<6} {'Baseline':<12} {'CGVD':<12} {'Delta':<8}")
+    print("-" * 58)
 
     for (category, num_dist), group in sorted(grouped.items()):
         baseline_rates = [r.baseline_rate for r in group]
         cgvd_rates = [r.cgvd_rate for r in group]
-        improvements = [r.improvement for r in group]
 
         baseline_mean = np.mean(baseline_rates)
         baseline_std = np.std(baseline_rates)
         cgvd_mean = np.mean(cgvd_rates)
         cgvd_std = np.std(cgvd_rates)
-        imp_mean = np.mean(improvements)
-
-        # Hard success rates
-        baseline_hard_rates = [r.baseline_hard_success_rate for r in group]
-        cgvd_hard_rates = [r.cgvd_hard_success_rate for r in group]
-        baseline_hard_mean = np.mean(baseline_hard_rates)
-        cgvd_hard_mean = np.mean(cgvd_hard_rates)
-        hard_imp_mean = cgvd_hard_mean - baseline_hard_mean
-
-        # Average CGVD time
-        cgvd_times = [e.cgvd_time for r in group for e in r.cgvd_results if e.cgvd_time > 0]
-        avg_cgvd_time = np.mean(cgvd_times) if cgvd_times else 0.0
+        imp_mean = np.mean([r.improvement for r in group])
 
         print(f"{category:<12} {num_dist:<6} {len(group):<6} "
               f"{baseline_mean:>5.1f}±{baseline_std:<5.1f} "
               f"{cgvd_mean:>5.1f}±{cgvd_std:<5.1f} "
-              f"{imp_mean:>+6.1f}% "
-              f"{baseline_hard_mean:>6.1f}% "
-              f"{cgvd_hard_mean:>6.1f}% "
-              f"{hard_imp_mean:>+6.1f}% "
-              f"{avg_cgvd_time:>6.2f}s")
+              f"{imp_mean:>+6.1f}%")
 
-    print("=" * 120)
-
-    # Print failure mode summary
-    print("\nFAILURE MODE BREAKDOWN")
-    print("-" * 60)
-    baseline_modes = {"success": 0, "never_reached": 0, "missed_grasp": 0, "dropped": 0}
-    cgvd_modes = {"success": 0, "never_reached": 0, "missed_grasp": 0, "dropped": 0}
-    for r in results:
-        for e in r.baseline_results:
-            if e.failure_mode in baseline_modes:
-                baseline_modes[e.failure_mode] += 1
-        for e in r.cgvd_results:
-            if e.failure_mode in cgvd_modes:
-                cgvd_modes[e.failure_mode] += 1
-
-    print(f"{'Mode':<15} {'Baseline':<10} {'CGVD':<10}")
-    print("-" * 35)
-    for mode in ["success", "never_reached", "missed_grasp", "dropped"]:
-        print(f"{mode:<15} {baseline_modes[mode]:<10} {cgvd_modes[mode]:<10}")
+    print("=" * 58)
 
 
 def main():
@@ -1197,24 +1151,15 @@ def main():
     # Generate configurations
     configs = generate_configs(args)
 
-    print("=" * 70)
-    print("BATCH EVALUATION CONFIGURATION")
-    print("=" * 70)
-    print(f"Task: {args.task}")
-    print(f"Categories: {args.categories}")
-    print(f"Distractor counts: {args.distractor_counts}")
-    print(f"Episodes per config: {args.episodes}")
-    print(f"Runs per config: {args.runs}")
-    print(f"Total configurations: {len(configs)}")
-    print(f"Total episodes: {len(configs) * args.episodes * 2}")  # x2 for baseline + CGVD
-    print("=" * 70)
+    total_eps = len(configs) * args.episodes * 2
+    print(f"Task: {args.task} | {len(configs)} configs x {args.episodes} eps x 2 = {total_eps} episodes")
 
     if args.dry_run:
-        print("\n[DRY RUN] Would run the following configurations:")
-        for i, c in enumerate(configs[:10]):  # Show first 10
-            print(f"  {i+1}. {c.task} | {c.category} | {c.num_distractors} dist | seed={c.seed}")
+        print("[DRY RUN]")
+        for i, c in enumerate(configs[:10]):
+            print(f"  {i+1}. {c.category} | {c.num_distractors} dist | seed={c.seed}")
         if len(configs) > 10:
-            print(f"  ... and {len(configs) - 10} more")
+            print(f"  ... +{len(configs) - 10} more")
         return
 
     # Determine output directory
@@ -1243,10 +1188,8 @@ def main():
     save_sweep_results(results, args.output_dir)
     print_sweep_summary(results)
 
-    # Final timing
-    print(f"\nModel load time: {evaluator.model_load_time:.2f}s (loaded ONCE for {len(configs)} configs)")
     total_episodes = sum(len(r.baseline_results) + len(r.cgvd_results) for r in results)
-    print(f"Total episodes run: {total_episodes}")
+    print(f"\n{total_episodes} episodes completed.")
 
 
 if __name__ == "__main__":

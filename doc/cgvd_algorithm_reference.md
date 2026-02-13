@@ -1,421 +1,731 @@
 # CGVD Algorithm Reference
 
-> Concept-Gated Visual Distillation — a model-agnostic perception preprocessing module
-> that removes visual distractors from robot manipulation scenes before observations
-> reach Vision-Language-Action (VLA) policies.
+**Concept-Gated Visual Distillation: Complete Algorithmic Description**
 
-## 1. System Overview
-
-CGVD is implemented as a `gym.Wrapper` that intercepts camera observations, removes
-clutter objects via segmentation + inpainting, and returns a "clean" image to the
-policy. The key guarantee: **task-relevant objects (target, anchor, robot) are never
-altered**, even if the segmenter confuses them with distractors.
-
-### Files
-
-| File | Lines | Role |
-|------|-------|------|
-| `src/cgvd/cgvd_wrapper.py` | 1235 | Core pipeline (gym wrapper) |
-| `src/cgvd/sam3_segmenter.py` | 577 | SAM3 text-prompted instance segmentation |
-| `src/cgvd/lama_inpainter.py` | 98 | LaMa inpainting backend |
-| `src/cgvd/instruction_parser.py` | 142 | NLP: instruction → (target, anchor) |
-| `src/cgvd/distractor_wrapper.py` | 1122 | Physical distractor placement in simulation |
-| `src/cgvd/collision_tracker.py` | 194 | Evaluation: robot-distractor collision detection |
-| `src/cgvd/grasp_analyzer.py` | 237 | Evaluation: grasp failure categorization |
-
-### Key Parameters
-
-| Parameter | Default | Purpose |
-|-----------|---------|---------|
-| `presence_threshold` | 0.15 | SAM3 confidence for safe-set (target/anchor) |
-| `distractor_presence_threshold` | 0.3 | SAM3 confidence for distractors |
-| `robot_presence_threshold` | 0.05 | SAM3 confidence for robot arm |
-| `safeset_warmup_frames` | 5 | Frames to accumulate masks before compositing |
-| `deferred_detection_frames` | 10 | Extra frames to find target if missed in warmup |
-| `blend_sigma` | 3.0 | Gaussian blur sigma for feathered compositing |
-| `lama_dilation` | 11 | Distractor mask dilation before safe-set subtraction |
-| `safe_dilation` | 5 | Protective buffer around target/anchor edges |
-| `cache_refresh_interval` | 0 | Re-inpaint interval (0 = disabled) |
-
-Derived: `_reinforce_size = safe_dilation + 2 * ceil(blend_sigma)` = **11px** with defaults.
+*Derived entirely from source code analysis. All line references are to the codebase at time of writing.*
 
 ---
 
-## 2. Pipeline Overview
+## 1. Architecture Overview
+
+CGVD is implemented as a `gym.Wrapper` (`CGVDWrapper` in `src/cgvd/cgvd_wrapper.py`) that intercepts visual observations from a robot manipulation environment and removes visual distractors while preserving task-relevant objects.
+
+### 1.1 System Components
+
+| Component | File | Role |
+|-----------|------|------|
+| CGVDWrapper | `src/cgvd/cgvd_wrapper.py` | Main pipeline: mask computation, compositing, clean plate management |
+| SAM3Segmenter | `src/cgvd/sam3_segmenter.py` | Text-prompted instance segmentation (SAM3 model) |
+| LamaInpainter | `src/cgvd/lama_inpainter.py` | Neural inpainting for clean plate generation |
+| InstructionParser | `src/cgvd/instruction_parser.py` | Extracts target/anchor objects from language instructions |
+
+### 1.2 Pipeline Summary
+
+For each frame, CGVD performs the following:
 
 ```
-reset()                          step()
-  │                                │
-  ├─ warmup (frames 0..4)         │
-  │   └─ _apply_cgvd() × 5       │
-  │      (accumulate masks,       │
-  │       skip compositing)       │
-  │                               │
-  ├─ first post-warmup frame      ├─ _apply_cgvd()
-  │   └─ _apply_cgvd()           │    (composite only,
-  │      (inpaint + composite)    │     reuse cached inpainted)
-  │                               │
-  └─ return obs to VLA            └─ return obs to VLA
+Language instruction  -->  InstructionParser  -->  (target, anchor)
+                                                        |
+Camera image  --------->  SAM3 Segmenter  --------->  distractor masks
+                    |                                   safe-set masks
+                    |                                   robot mask
+                    v
+              Mask Computation:  final_mask = distractor AND NOT safe
+                    |
+                    v
+              LaMa Inpainting  -->  clean plate (distractors + robot removed)
+                    |
+                    v
+              Compositing  -->  distilled image (distractors hidden, target + robot preserved)
 ```
 
-### Per-Frame Pipeline (`_apply_cgvd`)
+### 1.3 Wrapper Integration
+
+CGVDWrapper overrides two methods:
+
+- **`reset()`**: Clears all cached state, runs the warmup phase (N no-op frames to accumulate masks), then returns the first distilled observation. The VLA never sees warmup frames.
+- **`step(action)`**: Takes environment step, applies CGVD to the resulting observation, returns the distilled observation.
+
+---
+
+## 2. Instruction Parsing
+
+**File:** `src/cgvd/instruction_parser.py`
+
+### 2.1 Target and Anchor Extraction
+
+The `InstructionParser` maps natural language instructions to a `(target, anchor)` tuple:
+
+- **Target**: The object being manipulated (e.g., "spoon")
+- **Anchor**: The destination or reference object (e.g., "towel"), or `None` if absent
+
+Parsing uses a two-tier strategy:
+
+1. **Pattern matching** (priority): A table of regex patterns maps known task instructions to fixed `(target, anchor)` pairs. Examples:
+   - `"spoon.*towel"` -> `("spoon", "towel")`
+   - `"carrot.*plate"` -> `("carrot", "plate")`
+   - `"pick.*coke"` -> `("coke can", None)`
+
+2. **Heuristic fallback**: If no pattern matches, the parser strips action verbs ("pick", "place", "move", ...) and articles, then takes the first remaining noun as target. Anchor is extracted from prepositional phrases ("on the plate" -> "plate").
+
+### 2.2 SAM3 Concept Prompt Construction
+
+The parser builds a dot-separated prompt string for SAM3:
 
 ```
-Step 1: Parse instruction → (target, anchor)
-Step 2: Segment distractors (SAM3, accumulate during warmup, freeze after)
-Step 3a: Segment safe-set (SAM3, accumulate during warmup, freeze after)
-Step 3b: Segment robot (SAM3, every frame)
-Step 3.5: Dilate distractor mask by lama_dilation
-Step 4: Gate: cached_mask = dilated_distractor AND NOT dilated_safe
-Step 5: Inpaint (LaMa, first post-warmup frame only)
-Step 6: Composite (feathered alpha blend, every frame)
+build_concept_prompt(target="spoon", anchor="towel", include_robot=True)
+  -->  "spoon. towel. robot arm. robot gripper"
 ```
 
----
-
-## 3. Distractor Tracking
-
-### Segmentation
-- User provides distractor names (e.g., `["fork", "spatula", "knife"]`)
-- Joined into SAM3 query: `"fork. spatula. knife"` (line 521)
-- Queried at `distractor_presence_threshold=0.3` — higher threshold reduces false
-  positives (e.g., carrot detected as banana)
-- SAM3 queries each concept independently, returns per-instance masks + scores
-
-### Accumulation (warmup)
-- Frames 0 through `safeset_warmup_frames - 1`:
-  ```python
-  cached_distractor_mask = np.maximum(cached_distractor_mask, raw_distractor_mask)
-  ```
-- Union ensures objects missed on one frame are caught on another
-- After warmup: mask is **frozen** (distractors are stationary tabletop objects)
-
-### Post-Warmup Behavior
-- When `cache_distractor_once=True` (default): mask stays frozen permanently
-- When `cache_distractor_once=False`: mask is **replaced** (not accumulated) every
-  `update_freq` frames — loses warmup accumulation
-
-### Dilation (Step 3.5)
-- Before safe-set subtraction, dilate by `lama_dilation=11` px (line 696-700)
-- Expands coverage to catch shadows/edges SAM3 misses
-- Dilation happens **before** gating by safe-set, so it cannot bleed into protected regions
-- Applied to a local `distractor_mask` variable; `cached_distractor_mask` stays raw/undilated
-
-### Dead Code
-- `_suppress_overlapping_distractors()` (line 257-280) is defined but **never called**.
-  Comment at line 674-678 explains it was removed because the Step 4 gating formula
-  already handles overlap, and pre-suppression was causing distractors to show through.
-- `distractor_iou_threshold` parameter (default 0.15) is stored but never used.
+Each concept is queried independently by SAM3, sharing pre-computed vision embeddings for efficiency.
 
 ---
 
-## 4. Target + Anchor (Safe-Set) Tracking
+## 3. SAM3 Segmentation
 
-### Instruction Parsing (`instruction_parser.py`)
-- Pattern matching first: `"spoon.*towel"` → `("spoon", "towel")` (line 66-69)
-- Fallback: heuristic noun extraction — strip action verbs, first remaining noun =
-  target, noun after preposition = anchor (lines 76-121)
-- Builds SAM3 prompt: `"spoon. towel"` (robot excluded, tracked separately)
+**File:** `src/cgvd/sam3_segmenter.py`
 
-### Segmentation
-- SAM3 query at `presence_threshold=0.15` — low threshold to prefer over-protection
-  over missing the target (line 582-583)
-- Robot is excluded from this query (`include_robot=False` at line 580)
+### 3.1 Model Architecture
 
-### Top-1 Filtering (`_filter_overlapping_detections`, line 208-255)
-- SAM3 may return multiple instances (e.g., `spoon_0`=real spoon, `spoon_1`=spatula)
-- Groups by base concept name (strips `_0`, `_1` suffixes)
-- Keeps only the **highest-scoring** instance per concept
-- Applied **before** accumulation — filtered-out instances never enter `cached_safe_mask`
-- Called every frame during warmup (and deferred detection)
+CGVD uses SAM3 (`facebook/sam3`), a text-prompted instance segmentation model. The segmenter supports three backends:
 
-### Cross-Validation (`_cross_validate_safeset`, line 282-364)
-- For each target instance, computes:
-  ```
-  genuineness = safe_score - max_overlapping_distractor_score
-  ```
-  where overlap is measured by IoU > 0.3 between the safe instance and any distractor
-- Instances with negative genuineness are flagged as false positives
-- **Always keeps the most genuine instance** (highest genuineness score)
-- **Used for logging only** — the returned `fp_mask` is computed but never subtracted
-  from `cached_safe_mask` (line 633-636). Top-1 filtering handles false positive
-  rejection in practice.
+- **SAM3Segmenter**: Direct model inference (default). Uses `float16` precision on CUDA.
+- **SAM3ClientSegmenter**: Client-server architecture for environments with dependency conflicts. Communicates via file-based IPC (`/tmp/sam3_server`).
+- **MockSAM3Segmenter**: Testing backend that returns center-weighted Gaussian masks.
 
-### Accumulation (warmup)
-- Frames 0 through `safeset_warmup_frames - 1`:
-  ```python
-  cached_safe_mask = np.maximum(cached_safe_mask, raw_target_mask)  # union
-  _safe_mask_votes += (raw_target_mask > 0.5).astype(float32)       # vote count
-  ```
-- `np.maximum` union: safe mask only grows, never shrinks
-- Vote counting (`_safe_mask_votes`) is **diagnostic only** — logged on last warmup
-  frame (line 641-646) but never used for filtering or thresholding
-- After warmup: mask is **frozen**
+All backends use a singleton pattern to avoid redundant model loading across wrapper instances.
 
-### Deferred Detection (line 570-574)
-- If target was not detected during warmup (e.g., occluded by robot gripper):
-  - Safe-set segmentation continues for `deferred_detection_frames=10` more frames
-  - Condition: `not _target_detected_in_warmup AND frame_count < warmup + deferred`
-- Safe because: if SAM3 never saw the target, it also never labeled it as a distractor
-  → it shows through naturally at `mask=0` pixels
-- When target is finally detected, it's added to `cached_safe_mask` for explicit
-  protection going forward
+### 3.2 Multi-Concept Segmentation
 
-### Dilation (Step 4 gating)
-- `cached_safe_mask` (target+anchor only, no robot) dilated by `safe_dilation=5` px
-  (line 686-692)
-- Creates ~2.5px protective buffer around target edges
-- Counters the encroachment from `lama_dilation` on the distractor side
-- Used in the gating formula: `cached_mask = distractor AND NOT dilated_safe`
+The `segment()` method processes a dot-separated concept string:
+
+1. Parse concepts: `"spoon. carrot. robot arm"` -> `["spoon", "carrot", "robot arm"]`
+2. **Pre-compute vision embeddings** once via `model.get_vision_features()` (avoids redundant encoder forward passes across concepts)
+3. For each concept, run `_segment_single_concept()` with the shared vision embeddings
+4. Combine per-concept masks via `np.maximum()` (union)
+5. Binarize the combined mask at threshold 0.5
+
+### 3.3 Instance-Level Output
+
+For each concept, SAM3 may return multiple instances (e.g., two spoons). The segmenter stores:
+
+- `last_scores`: Dict mapping instance name -> confidence score
+- `last_individual_masks`: Dict mapping instance name -> binary mask `(H, W)`
+
+**Naming convention:**
+- Single instance: stored under the base concept name (e.g., `"spoon"`)
+- Multiple instances: indexed names without the base name (e.g., `"spoon_0"`, `"spoon_1"`)
+
+This per-instance output enables the downstream cross-validation and top-1 filtering algorithms.
+
+### 3.4 Three-Tier Confidence Thresholds
+
+CGVD uses different SAM3 confidence thresholds for different object categories:
+
+| Category | Threshold | Rationale |
+|----------|-----------|-----------|
+| Robot arm/gripper | 0.05 | Very permissive — robot must always be detected to prevent proprioception artifacts |
+| Safe-set (target/anchor) | 0.15 | Moderately permissive — target may be partially occluded by gripper during warmup |
+| Distractors | 0.30 | Strict — reduces false positives (e.g., carrot misdetected as banana) |
 
 ---
 
-## 5. Robot Arm Tracking
+## 4. Two-Phase Operation
 
-### Segmentation (every frame)
-- SAM3 query: `"robot arm. robot gripper"` at `robot_presence_threshold=0.05` (line 655-658)
-- Runs **every frame** — not gated by warmup or caching conditions
-- Uses `last_distilled_image` as input when available (line 656):
-  ```python
-  robot_image = self.last_distilled_image if self.last_distilled_image is not None else image
-  ```
-  The already-cleaned image gives SAM3 a cleaner view of the robot.
-  During warmup, `last_distilled_image` is `None`, so the raw frame is used.
+### 4.1 Warmup Phase
 
-### Warmup Accumulation
-- During warmup: `cached_robot_mask = np.maximum(cached_robot_mask, robot_mask)` (line 662-666)
-- This accumulated mask is used for clean-plate generation (`_build_inpaint_mask`)
-  so the robot's starting position is also inpainted away
+During `reset()`, CGVD runs `safeset_warmup_frames` (default: 5) internal steps before the VLA receives its first observation:
 
-### Decoupling from `cached_mask`
-- The gating formula (Step 4) uses `cached_safe_mask` (target+anchor **only**):
-  ```python
-  safe_mask_for_gating = dilate(cached_safe_mask > 0.5)     # no robot
-  cached_mask = distractor AND NOT safe_mask_for_gating      # stable across frames
-  ```
-- Robot is excluded so `cached_mask` doesn't have robot-shaped holes that shift every
-  frame (which would cause GaussianBlur to produce different feathered values → flicker)
-- Robot visibility is handled entirely in `_composite()` via re-enforcement
-
-### Clean-Plate Inpainting (`_build_inpaint_mask`, line 897-920)
-- Inpaint mask = `cached_mask` + robot (dilated by `_reinforce_size`)
-- Prefers `cached_robot_mask` (accumulated warmup union) over `last_robot_mask` (single frame)
-- Robot dilation covers the GaussianBlur spread (~2σ) so no stale arm-color pixels
-  remain after the arm moves away
-
----
-
-## 6. Compositing (`_composite`, line 797-895)
-
-The compositing algorithm blends the cached inpainted background with the live camera
-frame using a multi-stage feathered alpha approach.
-
-### Stage 1: Feathered Alpha
 ```python
-feathered = cv2.GaussianBlur(mask, (0, 0), sigmaX=blend_sigma, sigmaY=blend_sigma)
+for i in range(safeset_warmup_frames):
+    _apply_cgvd(obs)          # Accumulate masks, skip compositing
+    obs = env.step(zeros(7))  # No-op action (hold position, gripper unchanged)
 ```
-- `mask` = `cached_mask` (binary, stable across frames)
-- GaussianBlur creates smooth 0→1 transitions at mask boundaries
-- With `blend_sigma=3.0`, blur spread is ~9px (3σ on each side)
 
-### Stage 2: Binarize Inputs
+**Purpose**: Accumulate robust distractor and safe-set masks across multiple frames. SAM3 detection is unreliable on individual frames (scores can drop to 0.0 between frames), so union accumulation across warmup frames provides coverage.
+
+**Key properties:**
+- The VLA never sees warmup frames
+- Compositing is skipped during warmup (line 908: `if frame_count <= safeset_warmup_frames: return obs`)
+- The environment's `TimeLimit` is extended by `safeset_warmup_frames` steps so the VLA retains its full action budget
+
+### 4.2 Robot-Free Rendering
+
+During warmup, CGVD renders the scene with the robot hidden for safe-set SAM3 queries:
+
 ```python
-safe = (current_safe_mask > 0.5).astype(float32)           # target + anchor + robot
-binary_target = (cached_safe_mask > 0.5).astype(float32)   # target + anchor only
-binary_target = cv2.dilate(binary_target, _reinforce_size)  # dilate for buffer
+if in_warmup:
+    safe_query_image = _render_robot_free_image(camera_name)
 ```
 
-### Stage 3: Mechanism 2 — Distractor Clamping
+This hides robot visual meshes via `link.hide_visual()`, re-renders the scene, then restores the robot. The robot-free image gives SAM3 an unoccluded view of the target object.
+
+**Motivation**: Without this, the robot gripper hovering over the real spoon suppresses its SAM3 confidence, while a spatula (fully visible) may win top-1 filtering and lock into the safe-set incorrectly.
+
+**Important**: The robot-free image is used ONLY for SAM3 queries. The clean plate is computed from the real image (with robot visible) because SAPIEN's IBL renderer recomputes lighting when the robot is hidden, causing a global color shift that creates visible seams during compositing.
+
+### 4.3 Clean Plate Pre-Computation
+
+On the **last warmup frame**, CGVD pre-computes the clean plate:
+
 ```python
-binary_distractor = (cached_distractor_mask > 0.5).astype(float32)   # raw, undilated
-non_safe_distractor = binary_distractor * (1.0 - binary_target)       # exclude target
-feathered = np.maximum(feathered, non_safe_distractor)                # clamp to 1.0
+if frame_count == safeset_warmup_frames:
+    cached_inpainted_image = inpainter.inpaint(image, _build_inpaint_mask(), dilate_mask=0)
 ```
-- Uses `cached_distractor_mask` (raw/undilated), NOT the dilated local variable
-- Binarization prevents soft SAM3 edge values (0.6-0.7) from only partially clamping
-- Gated by `binary_target` so target pixels are never clamped to show inpainted bg
-- Effect: distractor pixels always show inpainted background (feathered=1.0)
 
-### Stage 4: Re-enforcement — Safe-Set Protection
+The clean plate is computed once and reused for all subsequent frames. The inpaint mask includes both distractors and the robot (see Section 10).
+
+### 4.4 Deferred Detection
+
+If the target was not detected during warmup (likely occluded by the gripper), CGVD enters a deferred detection window:
+
 ```python
-# Isolate robot contribution
-robot_contrib = np.clip(safe - binary_target, 0.0, 1.0)
-robot_binary = (robot_contrib > 0.5).astype(float32)
-
-# Dilate robot (halo elimination outside distractors)
-robot_binary_dilated = cv2.dilate(robot_binary, _reinforce_size)
-
-# Hybrid mask: dilated outside distractors, raw inside distractors
-if cached_distractor_mask is not None:
-    distractor_zone = (cached_distractor_mask > 0.5).astype(float32)
-    non_distractor = 1.0 - distractor_zone
-    robot_binary_dilated = (
-        robot_binary_dilated * non_distractor    # dilated outside
-        + robot_binary * distractor_zone          # raw binarized inside
-    )
-
-# Combine target protection + robot protection
-reinforce_mask = np.maximum(binary_target, robot_binary_dilated)
-feathered = feathered * (1.0 - reinforce_mask)   # force to 0.0 = show live frame
+in_deferred = (
+    not target_detected_in_warmup
+    and frame_count >= safeset_warmup_frames
+    and frame_count < safeset_warmup_frames + deferred_detection_frames  # default: 10 extra frames
+)
 ```
-- **Outside distractor zones**: robot dilated by `_reinforce_size` (11px) to eliminate
-  halo from GaussianBlur spread
-- **Inside distractor zones**: raw binarized robot (no dilation) to prevent SAM3 false
-  positive pixels from punching holes in the distractor coverage
-- Effect: target + robot pixels always show live frame (feathered=0.0)
 
-### Stage 5: Final Blend
-```python
-feathered_3d = feathered[..., None]
-result = feathered_3d * inpainted + (1.0 - feathered_3d) * live_frame
-```
-- `feathered=1.0` → pure inpainted background (distractors removed)
-- `feathered=0.0` → pure live frame (target, robot, non-distractor areas)
-- `0 < feathered < 1` → smooth transition at boundaries
+During deferred detection:
+- Compositing is **active** (VLA sees distilled frames)
+- Safe-set accumulation continues (target may become visible as robot moves)
+- When the deferred window expires, Layer 3 cleanup runs (see Section 6.4)
 
-### Hard Compositing Fallback
-When `blend_sigma=0`, skips all feathering and uses hard binary selection:
-```python
-mask_3d = mask[..., None] > 0.5
-return np.where(mask_3d, inpainted, image)
-```
+This is safe because: if SAM3 never detected the occluded target as a distractor, those pixels are not in `cached_mask`, so the target shows through naturally at `mask=0` pixels.
 
 ---
 
-## 7. Interaction Diagram
+## 5. Distractor Mask Accumulation
 
-```
-                    ┌──────────────────┐
-                    │   Distractors    │  SAM3 @ 0.3 threshold
-                    │  (frozen after   │  np.maximum accumulation
-                    │   warmup)        │  dilated by lama_dilation=11
-                    └────────┬─────────┘
-                             │
-                      AND NOT│
-                             │
-                    ┌────────┴─────────┐
-                    │    Safe-Set      │  SAM3 @ 0.15 threshold
-                    │  (target+anchor  │  np.maximum accumulation
-                    │   only, no robot │  dilated by safe_dilation=5
-                    │   frozen after   │  top-1 filtering per concept
-                    │   warmup)        │
-                    └────────┬─────────┘
-                             │
-                             ▼
-                    ┌──────────────────┐
-                    │   cached_mask    │  Binary, stable across frames
-                    │  (no robot)      │  No robot-shaped holes → no flicker
-                    └────────┬─────────┘
-                             │
-            ┌────────────────┼────────────────┐
-            ▼                ▼                ▼
-      GaussianBlur     Mechanism 2      Re-enforcement
-      (sigma=3.0)      (clamp=1.0       (force=0.0 at
-                        at distractor    target + robot)
-                        pixels outside
-                        target)
-            │                │                │
-            └────────────────┼────────────────┘
-                             ▼
-                    ┌──────────────────┐
-                    │  feathered blend │
-                    │  f*inpainted +   │
-                    │  (1-f)*live      │
-                    └──────────────────┘
+### 5.1 Detection
 
-    Robot (SAM3 @ 0.05 threshold, every frame):
-    ├── Excluded from cached_mask (prevents flicker)
-    ├── Included in _build_inpaint_mask (clean plate)
-    └── Re-enforced in _composite (punches through distractors)
+Each warmup frame, CGVD queries SAM3 for all distractors simultaneously:
+
+```python
+distractor_concepts = ". ".join(distractor_names)  # e.g., "carrot. banana. fork"
+raw_distractor_mask = segmenter.segment(image, distractor_concepts, presence_threshold=0.3)
 ```
+
+### 5.2 Accumulation Strategy
+
+| Phase | Behavior |
+|-------|----------|
+| First frame | `cached_distractor_mask = raw` (initialize) |
+| Warmup (frames 1..N-1) | `cached_distractor_mask = max(cached, raw)` (union accumulation) |
+| Post-warmup | Frozen (when `cache_distractor_once=True`, default) |
+
+Union accumulation (`np.maximum`) means the distractor mask can only grow during warmup, never shrink. This handles transient SAM3 misdetections where a distractor is missed on one frame but detected on the next.
+
+### 5.3 Morphological Dilation
+
+Before safe-set subtraction, the distractor mask is dilated:
+
+```python
+if lama_dilation > 0:
+    kernel = ones((lama_dilation, lama_dilation))   # default: 11x11
+    distractor_mask = dilate(distractor_mask > 0.5, kernel)
+```
+
+**Purpose**: Expand the distractor region so that LaMa inpainting covers the full extent of each distractor object including any GaussianBlur spread. The dilation is applied BEFORE safe-set subtraction, so the dilated region is properly gated by the safe set (task objects never bleed into the inpaint region).
 
 ---
 
-## 8. Warmup Sequence Detail
+## 6. Safe-Set Construction: Three-Layer Filtering
+
+The safe-set identifies pixels that must be **preserved** (shown from the live frame, never inpainted). It consists of three object categories:
+
+- **Target**: The object being manipulated (e.g., spoon)
+- **Anchor**: The destination or reference object (e.g., towel)
+- **Robot**: The robot arm and gripper (handled separately, see Section 7)
+
+CGVD uses a three-layer sequential filtering strategy to build a robust safe-set from potentially noisy SAM3 detections.
+
+### 6.1 Layer 1: Cross-Validation (Genuineness Scoring)
+
+**Method:** `_cross_validate_safeset()` (line 315)
+
+**Problem**: SAM3 may return multiple instances for the target concept (e.g., `spoon_0` = real spoon, `spoon_1` = spatula misclassified as spoon). If the wrong instance is accumulated, a distractor enters the safe-set and becomes permanently visible.
+
+**Algorithm**: For each TARGET instance (anchors are never filtered):
+
+1. Compute IoU between the target instance mask and every distractor mask
+2. For overlapping distractors (IoU > 0.3), find the highest-scoring distractor
+3. Compute **genuineness**:
 
 ```
-Frame 0:  Segment distractors → init cached_distractor_mask
-          Segment safe-set    → init cached_safe_mask + votes
-          Segment robot       → init cached_robot_mask
-          Skip compositing (VLA never sees this frame)
-
-Frame 1-4: Same as frame 0 but accumulate via np.maximum
-           Cross-validate (logging only)
-           On frame 4: log vote statistics
-
-Frame 5:  (First post-warmup frame)
-          Distractor mask: frozen (not recomputed)
-          Safe-set mask: frozen (not recomputed, unless deferred)
-          Robot mask: fresh segmentation
-          Step 3.5: Dilate distractor mask
-          Step 4: Gate = distractor AND NOT safe
-          Step 5: Build inpaint mask (cached_mask + robot)
-                  Run LaMa → cached_inpainted_image
-                  Composite → first VLA observation
-
-Frame 6+: Robot re-segmented each frame
-          Composite using cached_inpainted_image + fresh robot mask
-          Optional: cache refresh every cache_refresh_interval frames
+genuineness = safe_score - max_overlapping_distractor_score
 ```
 
----
+4. **Decision rule**:
+   - The instance with the highest genuineness is ALWAYS kept (even if negative)
+   - Other instances with `genuineness < genuineness_margin` (default: -0.1) are removed
 
-## 9. SAM3 Segmenter Architecture (`sam3_segmenter.py`)
+**Intuition**: A real spoon might score 0.85 as "spoon" and overlap with a spatula scoring 0.70 as a distractor -> genuineness = +0.15 (keep). A spatula misdetected as "spoon" might score 0.75 but overlap with its own correct distractor detection at 0.82 -> genuineness = -0.07 (remove, since < -0.1 would apply to non-best instances).
 
-### Three Backends
+**Critical ordering**: Cross-validation runs BEFORE top-1 filtering, on the full multi-instance set. This allows false positives to be removed before top-1 could inadvertently select them.
 
-| Class | Use Case | Communication |
-|-------|----------|---------------|
-| `SAM3Segmenter` | Default, direct HuggingFace model | In-process GPU |
-| `SAM3ClientSegmenter` | When transformers version conflicts (e.g., GR00T) | File-based IPC via `/tmp/sam3_server` |
-| `MockSAM3Segmenter` | Testing without GPU/model | Center-weighted Gaussian |
+**Critical accumulation rule**: The false-positive mask is subtracted from THIS FRAME's masks only (before accumulation), not from the cumulative `cached_safe_mask`. Subtracting from the accumulated union would be destructive: one bad frame where the real spoon has negative genuineness would wipe pixels accumulated across all previous good frames.
 
-### Segmentation Flow (`SAM3Segmenter.segment`)
-1. Parse dot-separated concepts: `"fork. spatula"` → `["fork", "spatula"]`
-2. Pre-compute vision embeddings once (shared across concepts):
+### 6.2 Layer 2: Top-1 Filtering
+
+**Method:** `_filter_overlapping_detections()` (line 266)
+
+After cross-validation cleans the multi-instance set, top-1 filtering keeps only the highest-confidence instance per concept:
+
+```python
+for each concept:
+    instances.sort(by=score, descending)
+    keep instances[0]  # highest score wins
+```
+
+This reduces the per-concept output to at most one mask, preventing SAM3 multi-instance confusion from propagating downstream.
+
+### 6.3 Layer 2b: IoU-Gated Target Accumulation
+
+**Method:** `_accumulate_target()` (line 399)
+
+After filtering, the surviving target mask is accumulated into `cached_target_mask` using `np.maximum` (union). However, to prevent spatially inconsistent detections from contaminating the cache, an IoU gate is applied:
+
+**Algorithm:**
+
+| Condition | Behavior |
+|-----------|----------|
+| First detection ever | Initialize `cached_target_mask` and per-pixel vote counter |
+| Early frames (`frame < iou_gate_start_frame`, default: 2) | Accumulate unconditionally |
+| Deferred detection mode | Accumulate unconditionally |
+| Normal warmup frames | Compute IoU between new detection and `cached_target_mask`. If `IoU > iou_gate_threshold` (default: 0.15), accumulate. Otherwise, reject. |
+
+**Per-pixel vote tracking**: Each time a pixel is accumulated, its vote counter is incremented:
+
+```python
+_target_votes += (new_mask > 0.5).astype(float32)
+```
+
+This records how many warmup frames detected each pixel, providing a temporal consistency measure used in Layer 3.
+
+**Anchor accumulation**: Anchor masks are accumulated unconditionally (never filtered, never IoU-gated).
+
+### 6.4 Layer 3: Post-Warmup Spatial Cleanup
+
+**Method:** `_cleanup_target_mask()` (line 443)
+
+**Problem**: Despite Layers 1-2, the accumulated target mask may contain multiple spatially disjoint components (e.g., the real spoon + pixels from a fork that was misdetected as "spoon" on some frames).
+
+**Algorithm:**
+
+1. **Connected component analysis** on the binarized `cached_target_mask`:
    ```python
-   vision_embeds = model.get_vision_features(pixel_values)
+   num_labels, labels = cv2.connectedComponents(binary_mask, connectivity=4)
    ```
-3. Query each concept independently with shared vision embeddings
-4. Per-concept: `post_process_instance_segmentation` → per-instance masks + scores
-5. Combine all instances via `np.maximum` → combined mask
-6. Binarize at 0.5 threshold
-7. Store per-concept scores in `last_scores` and per-instance masks in `last_individual_masks`
+   Uses 4-connectivity (not 8) to reduce false merges from diagonally-adjacent masks.
 
-### Singleton Pattern
-- `get_sam3_segmenter()` returns a shared instance (~2.5GB model, loaded once)
-- `get_lama_inpainter()` returns a shared LaMa instance (~2GB)
-- Prevents redundant model loading across multiple `CGVDWrapper` instances
+2. **Score each component** using temporal consistency and distractor contamination:
+   ```python
+   avg_votes = target_votes[component].mean()       # How consistently detected
+   dist_overlap = AND(component, distractor > 0.5).sum() / pixel_count  # Distractor contamination
+   overlap_penalty = min(dist_overlap, overlap_penalty_cap)             # Cap at 0.7
+   score = avg_votes * (1.0 - overlap_penalty)
+   ```
 
----
+3. **Keep only the best-scoring component**, discard all others.
 
-## 10. LaMa Inpainting (`lama_inpainter.py`)
+**Why this works**: Consider two components:
+- Real spoon: detected in 4/5 warmup frames (avg_votes ~ 0.8), 20% distractor overlap -> score = 0.8 * 0.8 = 0.64
+- Fork-as-spoon: detected in 2/5 frames (avg_votes ~ 0.4), 95% distractor overlap (it IS a fork distractor) -> score = 0.4 * 0.3 = 0.12
 
-- Wraps `simple_lama_inpainting.SimpleLama`
-- Uses Fast Fourier Convolutions (FFC) for global receptive field
-- Generates realistic textures (not just local patch copying)
-- Called with `dilate_mask=0` from CGVD (dilation handled in Step 3.5 instead)
-- Runs once per episode (first post-warmup frame), result cached as `cached_inpainted_image`
-- Optional periodic refresh via `cache_refresh_interval` (disabled by default)
+The real spoon wins decisively.
 
----
+**Trigger conditions:**
+- Runs once at the end of warmup (last warmup frame)
+- Runs again when the deferred detection window expires (if deferred detection was active)
 
-## 11. Ablation Flags
-
-| Flag | Effect |
-|------|--------|
-| `disable_safeset=True` | Skip safe-set protection entirely; mask = raw dilated distractors |
-| `disable_inpaint=True` | Replace LaMa with mean-color fill (`_apply_mean_fill`) |
+After cleanup, `_recompute_cached_safe_mask()` merges the cleaned target with the anchor:
+```python
+cached_safe_mask = max(cached_target_mask, cached_anchor_mask)
+```
 
 ---
 
-## 12. Timing Characteristics
+## 7. Robot Arm Protection
 
-| Component | Frequency | Approximate Time |
-|-----------|-----------|-----------------|
-| SAM3 segmentation | Every frame (robot) + warmup (distractors, safe-set) | 50-200ms |
-| LaMa inpainting | Once per episode (+ optional refresh) | 100-500ms |
-| Compositing | Every frame | <5ms |
-| Total per-frame (post-warmup) | Every frame | ~55-205ms |
+The robot arm requires special handling because it is:
+1. Always present and always task-relevant (must never be inpainted)
+2. Moving every frame (unlike stationary target/anchor)
 
-Timing stats available via `get_timing_stats()` method.
+### 7.1 Per-Frame Detection
+
+The robot is segmented from the **live frame** (not the robot-free render) every frame:
+
+```python
+robot_mask = segmenter.segment(image, "robot arm. robot gripper", presence_threshold=0.05)
+```
+
+The very low threshold (0.05) ensures the robot is always detected, even with low SAM3 confidence.
+
+### 7.2 Decoupling from Cached Mask
+
+**Critical design decision**: The robot mask is NOT used in the Step 4 mask computation (`cached_mask = distractor AND NOT safe`). Instead, Step 4 uses only `cached_safe_mask` (target + anchor, no robot):
+
+```python
+safe_mask_for_gating = dilate(cached_safe_mask > 0.5, kernel)  # No robot
+cached_mask = AND(distractor > 0.5, safe_mask_for_gating < 0.5)
+```
+
+**Rationale**: The robot moves every frame. If robot pixels were subtracted from `cached_mask`, the robot-shaped holes would shift each frame. When GaussianBlur is applied during compositing, different feathered values would be produced at different robot positions -> temporal flicker.
+
+By excluding the robot from `cached_mask`, the mask is stable across frames (only depends on stationary distractors and safe-set). Robot visibility is instead handled in the compositing stage via re-enforcement (Section 9).
+
+### 7.3 Robot in Warmup Accumulation
+
+During warmup, the robot mask is accumulated for clean plate generation:
+
+```python
+if in_warmup:
+    cached_robot_mask = max(cached_robot_mask, robot_mask)
+```
+
+### 7.4 Safe Mask Composition
+
+The per-frame safe mask combines the stationary cached safe-set with the fresh robot detection:
+
+```python
+current_safe_mask = max(cached_safe_mask, robot_mask)  # target + anchor + robot
+```
+
+This `current_safe_mask` is used in compositing re-enforcement (Section 9), not in Step 4 gating.
+
+---
+
+## 8. Final Mask Computation (Step 4)
+
+### 8.1 Safe-Set Dilation
+
+Before subtraction, the safe-set mask is dilated to create a protective buffer:
+
+```python
+safe_dilation_kernel = ones((safe_dilation, safe_dilation))  # default: 5x5
+safe_mask_for_gating = dilate(cached_safe_mask > 0.5, safe_dilation_kernel)
+```
+
+**Purpose**: SAM3 tends to under-segment object boundaries by 1-3 pixels. Without dilation, the GaussianBlur feathering in compositing would bleed inpainted (table texture) values into the gap between SAM3's boundary and the actual object edge, creating a visible halo. The 5px dilation (~2.5px buffer) prevents this.
+
+### 8.2 Mask Subtraction
+
+```python
+cached_mask = AND(distractor_mask > 0.5, safe_mask_for_gating < 0.5)
+```
+
+Verbally: a pixel is in the final mask if and only if it is (a) detected as a distractor AND (b) not in the dilated safe set.
+
+**Binary thresholding**: Both masks are binarized at 0.5 before the logical operation. This prevents soft SAM3 boundary values (e.g., 0.6-0.7) from leaking through the logical AND.
+
+### 8.3 Mask Variable Summary
+
+| Variable | Contents | Updated When |
+|----------|----------|--------------|
+| `cached_distractor_mask` | Raw (undilated) distractor accumulation | Warmup: union each frame. Post-warmup: frozen |
+| `distractor_mask` | Dilated version of cached_distractor_mask | Computed each frame from cached + dilation |
+| `cached_safe_mask` | max(target, anchor) — stationary objects only | Warmup + Layer 3 cleanup |
+| `cached_target_mask` | Accumulated + cleaned target detections | Warmup + IoU gating + Layer 3 cleanup |
+| `cached_anchor_mask` | Accumulated anchor detections | Warmup (unconditional) |
+| `cached_robot_mask` | Accumulated robot during warmup | Warmup only |
+| `last_robot_mask` | This frame's robot detection | Every frame |
+| `current_safe_mask` | max(cached_safe_mask, last_robot_mask) — includes robot | Every frame |
+| `cached_mask` | Final compositing mask: distractor AND NOT dilated_safe | Every frame (stable post-warmup) |
+| `safe_mask_for_gating` | Dilated cached_safe_mask (for Step 4 only) | Every frame |
+
+---
+
+## 9. Compositing Pipeline
+
+**Method:** `_composite()` (line 990)
+
+The compositing pipeline blends the cached clean plate (inpainted background) with the live camera frame, using the `cached_mask` to determine which pixels show the clean plate vs. the live frame.
+
+### 9.1 Feathered Blending (Step 1)
+
+```python
+feathered = GaussianBlur(mask, sigma=blend_sigma)  # default: sigma=3.0
+```
+
+The binary mask is blurred to create smooth alpha transitions at distractor boundaries. With `sigma=3.0`, the blur has visible effect within ~9 pixels (3 sigma) of each boundary.
+
+### 9.2 Binary Mask Preparation (Step 2)
+
+All masks are binarized to prevent soft SAM3 values from leaking:
+
+```python
+safe = (current_safe_mask > 0.5).astype(float32)         # target + anchor + robot
+binary_target = (cached_safe_mask > 0.5).astype(float32)  # target + anchor only
+```
+
+The `binary_target` mask is dilated by `_reinforce_size = safe_dilation + 2 * ceil(blend_sigma)` pixels (default: 5 + 6 = 11):
+
+```python
+binary_target = dilate(binary_target, kernel=(reinforce_size, reinforce_size))
+```
+
+This dilation ensures that GaussianBlur's feathered values are negligible (< 2%) at the re-enforcement boundary, eliminating any table-color outline artifact.
+
+### 9.3 Mechanism 2: Distractor Clamping (Step 3)
+
+```python
+binary_distractor = (cached_distractor_mask > 0.5).astype(float32)
+non_safe_distractor = binary_distractor * (1.0 - binary_target)
+feathered = max(feathered, non_safe_distractor)
+```
+
+**Problem**: GaussianBlur spreads the feathered values outward from the mask boundary. At pixels that are distractor but not currently in `cached_mask` (e.g., due to mask boundary imprecision), the feathered value might be low (0.3-0.6), allowing 40-70% of the distractor to leak through.
+
+**Solution**: For every pixel that is a distractor AND not in the dilated safe-set, clamp `feathered` to at least 1.0. This forces 100% of the inpainted background at distractor locations.
+
+**Binarization is critical**: Without binarizing `cached_distractor_mask`, soft SAM3 edge values (e.g., 0.6) would cause `np.maximum(feathered, 0.6)` to clamp to only 60%, leaking 40% of the distractor through.
+
+### 9.4 Re-Enforcement: Safe-Set Protection (Step 4)
+
+```python
+reinforce_mask = max(safe, binary_target)
+feathered = feathered * (1.0 - reinforce_mask)
+```
+
+**Purpose**: Zero out the feathered value at all safe-set pixels (target + anchor + robot), guaranteeing they show 100% of the live frame.
+
+The `reinforce_mask` combines two masks:
+- `safe` (binarized `current_safe_mask`): includes this frame's robot detection
+- `binary_target` (dilated `cached_safe_mask`): provides extra halo protection for stationary target/anchor
+
+Robot uses the raw SAM3 mask via `safe` — the 1-2px SAM3 boundary under-segmentation is imperceptible since re-enforcement shows the live frame directly.
+
+### 9.5 Final Alpha Blend (Step 5)
+
+```python
+result = feathered * inpainted + (1.0 - feathered) * image
+```
+
+At each pixel:
+- `feathered = 1.0`: Show 100% clean plate (distractor fully hidden)
+- `feathered = 0.0`: Show 100% live frame (target/robot fully visible)
+- `0 < feathered < 1`: Smooth blend at boundaries
+
+### 9.6 Compositing Summary
+
+The four steps form a defense-in-depth:
+
+1. **GaussianBlur**: Creates smooth alpha transitions (prevents hard seams)
+2. **Mechanism 2 (clamp)**: Forces distractor pixels to show clean plate (prevents leakage from soft SAM3 values)
+3. **Re-enforcement**: Forces safe-set pixels to show live frame (prevents target/robot from being inpainted)
+4. **Alpha blend**: Produces final seamless composite
+
+---
+
+## 10. Clean Plate Generation
+
+### 10.1 Inpaint Mask Construction
+
+**Method:** `_build_inpaint_mask()` (line 1060)
+
+The inpaint mask includes both distractors and the robot:
+
+```python
+mask = cached_mask.copy()           # Distractors (already subtracted safe-set)
+robot = cached_robot_mask or last_robot_mask
+robot = dilate(robot > 0.5, kernel=(reinforce_size, reinforce_size))
+mask = max(mask, robot)
+```
+
+**Why include robot**: The clean plate should show only the table/background. Including the robot in the inpaint mask means LaMa removes both distractors and the robot, producing a clean background.
+
+**Why dilate robot**: The gap between the undilated robot mask and the dilated-safe hole in `cached_mask` leaves un-inpainted pixels that retain stale robot arm color. Dilating by `_reinforce_size` (default: 11px) covers the GaussianBlur spread.
+
+**Why NOT include target**: Keeping the target visible in the clean plate means that even if compositing feathering is imperfect near a distractor boundary, the target still appears (from the clean plate side). A minor ghost at the target's old position after pickup is far less harmful than the target disappearing during approach.
+
+### 10.2 LaMa Inpainting
+
+**File:** `src/cgvd/lama_inpainter.py`
+
+The `LamaInpainter` wraps the `SimpleLama` model:
+
+```python
+def inpaint(image, mask, dilate_mask=11):
+    mask_uint8 = (mask * 255).astype(uint8)
+    if dilate_mask > 0:
+        mask_uint8 = dilate(mask_uint8, kernel=(dilate_mask, dilate_mask))
+    result = model(image, mask_uint8)
+    return array(result)
+```
+
+The inpainter supports optional mask dilation (default 11px), but when called from `_build_inpaint_mask()`, dilation is already applied upstream, so `dilate_mask=0` is passed.
+
+The inpainter uses a singleton pattern with lazy model loading to avoid redundant initialization.
+
+### 10.3 Clean Plate Lifecycle
+
+| Event | Action |
+|-------|--------|
+| Last warmup frame | Compute clean plate from **real image** (with robot), using full inpaint mask (distractors + dilated robot) |
+| Post-warmup frames | Reuse cached clean plate (no recomputation by default) |
+| Optional periodic refresh | If `cache_refresh_interval > 0`, recompute every N frames (disabled by default; introduces visual jumps) |
+
+---
+
+## 11. Complete Frame-by-Frame Trace
+
+### 11.1 Warmup Frame (frame 0 through N-1)
+
+```
+1. Extract image from observation
+2. Parse instruction -> (target, anchor)
+3. Segment distractors from live image (threshold=0.3)
+   -> cached_distractor_mask = max(cached, raw)  [union]
+4. Render robot-free image (hide robot meshes, re-render)
+5. Segment target+anchor from robot-free image (threshold=0.15)
+   a. Layer 1: Cross-validate instances (genuineness scoring)
+   b. Top-1: Keep highest-scoring instance per concept
+   c. Accumulate target (IoU-gated) and anchor (unconditional)
+   d. Recompute: cached_safe_mask = max(target, anchor)
+   e. If last warmup frame: Layer 3 cleanup (connected components)
+6. Segment robot from live image (threshold=0.05)
+   -> cached_robot_mask = max(cached, robot)
+7. Dilate safe mask (5x5 kernel)
+8. Dilate distractor mask (11x11 kernel)
+9. cached_mask = distractor AND NOT dilated_safe
+10. If last warmup frame: pre-compute clean plate via LaMa
+11. Skip compositing, return observation unchanged
+```
+
+### 11.2 Post-Warmup Frame (frame N onward)
+
+```
+1. Extract image from observation
+2. Parse instruction -> (target, anchor) [usually cached]
+3. Use frozen cached_distractor_mask (no recomputation)
+4. Use frozen cached_safe_mask (no recomputation)
+5. Segment robot from live image (fresh every frame, threshold=0.05)
+   -> current_safe_mask = max(cached_safe_mask, robot_mask)
+6. Dilate cached_safe_mask for gating (5x5 kernel)
+7. Dilate cached_distractor_mask for inpainting (11x11 kernel)
+8. cached_mask = distractor AND NOT dilated_safe  [stable, since all inputs are frozen except robot, which is excluded]
+9. Composite:
+   a. GaussianBlur(cached_mask, sigma=3.0) -> feathered
+   b. Mechanism 2: Clamp feathered at binary distractor pixels
+   c. Re-enforcement: Zero feathered at safe-set pixels (incl. robot)
+   d. result = feathered * clean_plate + (1-feathered) * live_image
+10. Write distilled image back to observation
+```
+
+---
+
+## 12. Parameters Reference
+
+### 12.1 Core Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `update_freq` | 1 | Frames between SAM3 updates (1 = every frame) |
+| `include_robot` | True | Include robot arm/gripper in safe-set |
+| `distractor_names` | [] | List of distractor object names to remove |
+| `cache_distractor_once` | True | Freeze distractor mask after warmup |
+
+### 12.2 Detection Thresholds
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `presence_threshold` | 0.15 | SAM3 confidence threshold for safe-set (target/anchor) |
+| `robot_presence_threshold` | 0.05 | SAM3 confidence threshold for robot detection |
+| `distractor_presence_threshold` | 0.30 | SAM3 confidence threshold for distractor detection |
+
+### 12.3 Warmup Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `safeset_warmup_frames` | 5 | Number of no-op frames for mask accumulation |
+| `deferred_detection_frames` | 10 | Extra frames to detect occluded target post-warmup |
+
+### 12.4 Compositing Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `blend_sigma` | 3.0 | GaussianBlur sigma for feathered blending (~9px visible spread) |
+| `lama_dilation` | 11 | Distractor mask dilation before inpainting (11x11 kernel) |
+| `safe_dilation` | 5 | Safe-set mask dilation for protective buffer (5x5 kernel) |
+| `cache_refresh_interval` | 0 | Frames between clean plate refresh (0 = never refresh) |
+
+**Derived parameter**: `_reinforce_size = safe_dilation + 2 * ceil(blend_sigma)` = 5 + 2*3 = 11 pixels. Used for dilating `binary_target` in compositing re-enforcement and robot mask in inpaint mask construction.
+
+### 12.5 Safe-Set Robustness Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `genuineness_margin` | -0.1 | Threshold for cross-validation: instances with genuineness below this are removed |
+| `iou_gate_threshold` | 0.15 | Minimum IoU for accepting a new target detection into the accumulator |
+| `iou_gate_start_frame` | 2 | Frame index when IoU gating becomes active |
+| `min_component_pixels` | 50 | Minimum pixel count for a valid connected component |
+| `overlap_penalty_cap` | 0.7 | Maximum penalty for distractor overlap in Layer 3 scoring |
+
+### 12.6 Ablation Flags
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `disable_safeset` | False | Skip safe-set subtraction (mask distractors without protecting target) |
+| `disable_inpaint` | False | Use mean-color fill instead of LaMa inpainting |
+
+---
+
+## 13. Algorithmic Formulas Summary
+
+### Genuineness (Layer 1 Cross-Validation)
+
+```
+genuineness(instance_i) = confidence(instance_i, target_concept)
+                        - max_{d in distractors, IoU(instance_i, d) > 0.3} confidence(d)
+```
+
+Decision: Keep if `genuineness >= genuineness_margin` OR if `instance_i` has the highest genuineness among all target instances.
+
+### IoU Gate (Layer 2b Target Accumulation)
+
+```
+IoU = |new_binary AND cached_binary| / |new_binary OR cached_binary|
+
+Accumulate if IoU > iou_gate_threshold (and frame >= iou_gate_start_frame)
+```
+
+### Component Score (Layer 3 Cleanup)
+
+```
+avg_votes = mean(target_votes[component_pixels])
+dist_overlap = |component AND distractor_mask| / |component|
+overlap_penalty = min(dist_overlap, overlap_penalty_cap)
+score = avg_votes * (1.0 - overlap_penalty)
+```
+
+Keep the component with the highest score.
+
+### Compositing
+
+```
+feathered = GaussianBlur(cached_mask, sigma=blend_sigma)
+
+// Mechanism 2: Clamp at distractor pixels
+non_safe_distractor = binarize(distractor) * (1 - dilated_binary_target)
+feathered = max(feathered, non_safe_distractor)
+
+// Re-enforcement: Protect safe-set
+reinforce = max(binarize(current_safe), dilated_binary_target)
+feathered = feathered * (1 - reinforce)
+
+// Blend
+result = feathered * clean_plate + (1 - feathered) * live_frame
+```
+
+### Mask Computation (Step 4)
+
+```
+cached_mask = binarize(dilated_distractor) AND NOT binarize(dilated_safe)
+```
+
+Where:
+- `dilated_distractor = morphological_dilate(cached_distractor_mask, kernel=lama_dilation)`
+- `dilated_safe = morphological_dilate(cached_safe_mask, kernel=safe_dilation)`
+- `binarize(x) = (x > 0.5)`

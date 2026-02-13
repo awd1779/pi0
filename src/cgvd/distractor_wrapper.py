@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
 import sapien.core as sapien
@@ -335,8 +335,7 @@ class DistractorWrapper:
     DEFAULT_EXTERNAL_ASSET_SCALE = 0.1  # 10% of original size for rc_* and ycb_* objects
 
     def _log(self, msg):
-        """Print and buffer a log message for later file output."""
-        print(msg)
+        """Buffer a log message for later file output (silent on console)."""
         self._log_lines.append(msg)
 
     def __init__(self, env, distractor_ids, distractor_scale=None, external_asset_scale=None,
@@ -1113,6 +1112,30 @@ class DistractorWrapper:
                 del cam_images["Position"]
 
         return obs
+
+    def get_cgvd_concept_names(self) -> List[str]:
+        """Return SAM3 concept names for currently-spawned distractors.
+
+        Derives human-readable concept names from asset IDs using the same
+        logic as batch_eval.load_distractors_from_file().  When
+        randomize_per_episode=True, self.distractor_ids changes each episode,
+        so the returned list reflects only the actually-spawned objects.
+        """
+        names: List[str] = []
+        for asset_id in self.distractor_ids:
+            parts = asset_id.split("_")
+            if len(parts) >= 3:
+                if parts[0] == "ycb":
+                    name = " ".join(parts[2:])
+                else:
+                    name = " ".join(parts[1:-1])
+                if name and name not in names:
+                    names.append(name)
+            elif len(parts) == 2:
+                name = parts[0]
+                if name and name not in names:
+                    names.append(name)
+        return names
 
     def step(self, action):
         return self.env.step(action)

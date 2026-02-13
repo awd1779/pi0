@@ -527,6 +527,17 @@ class CGVDWrapper(gym.Wrapper):
         # Reset environment
         obs, info = self.env.reset(seed=seed, options=options)
 
+        # Update distractor names to match actually-spawned objects
+        # (when randomize_per_episode=True, the spawned set changes each episode)
+        try:
+            spawned_names = self.env.get_cgvd_concept_names()
+            if spawned_names:
+                self.distractor_names = spawned_names
+                if self.verbose:
+                    print(f"[CGVD] Updated distractor names from spawned objects: {spawned_names}")
+        except AttributeError:
+            pass  # No DistractorWrapper in chain, keep static names
+
         # Clear cached state
         self.cached_mask = None
         self.cached_distractor_mask = None
@@ -938,10 +949,9 @@ class CGVDWrapper(gym.Wrapper):
         #   to cached_safe_mask for explicit protection
         if (self.frame_count == self.safeset_warmup_frames + 1
                 and not self._target_detected_in_warmup):
-            print(
+            self._log(
                 f"[CGVD] WARNING: Target '{self.current_target}' not detected during warmup "
-                f"(likely occluded by robot). Continuing compositing with deferred target detection "
-                f"for {self.deferred_detection_frames} frames."
+                f"(deferred detection for {self.deferred_detection_frames} frames)"
             )
 
         # Apply visual distillation to remove distractors

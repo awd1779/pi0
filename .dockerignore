@@ -32,5 +32,6 @@ paper/
 figures/
 doc/
 
-# UV cache (will be rebuilt in container)
+# UV (prevent uv run from creating a new venv in container)
 .venv/
+uv.lock
