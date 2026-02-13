@@ -280,6 +280,7 @@ class BatchEvaluator:
         mode: str = "baseline",
         output_dir: Optional[str] = None,
         task: str = "",
+        category: str = "",
         use_cgvd: bool = False,
     ) -> EpisodeResult:
         """Run a single episode."""
@@ -310,7 +311,7 @@ class BatchEvaluator:
         video_writer = None
         video_path = None
         if self.recording and output_dir:
-            video_path = os.path.join(output_dir, f"try_{task}_{mode}_ep{episode_idx}.mp4")
+            video_path = os.path.join(output_dir, f"try_{task}_{category}_{mode}_ep{episode_idx}.mp4")
             video_writer = imageio.get_writer(video_path, fps=10)
 
         cnt_step = 0
@@ -350,7 +351,7 @@ class BatchEvaluator:
                 # pixel_values is [B, C, H, W] normalized, convert to [H, W, C] uint8
                 img = pixel_values[0].permute(1, 2, 0).numpy()
                 img = ((img - img.min()) / (img.max() - img.min() + 1e-8) * 255).astype(np.uint8)
-                attn_path = os.path.join(output_dir, f"attention_{task}_{mode}_ep{episode_idx}.png")
+                attn_path = os.path.join(output_dir, f"attention_{task}_{category}_{mode}_ep{episode_idx}.png")
                 saved = self.attention_capture.save_attention_map(img, attn_path)
                 if saved:
                     print(f"  [Attention] Saved: {attn_path}")
@@ -499,6 +500,7 @@ class BatchEvaluator:
                 mode="baseline",
                 output_dir=baseline_output,
                 task=config.task,
+                category=config.category,
                 use_cgvd=False,
             )
             baseline_results.append(result)
@@ -522,6 +524,7 @@ class BatchEvaluator:
                     mode="cgvd",
                     output_dir=cgvd_output,
                     task=config.task,
+                    category=config.category,
                     use_cgvd=True,
                 )
                 cgvd_results.append(result)

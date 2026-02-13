@@ -1,44 +1,44 @@
 # Control distractors for carrot task (widowx_carrot_on_plate)
 # Pool size: 20 (RoboCasa utensils + containers, no vegetables)
 # Category: random - no semantic similarity to target
-# Scale: 0.06
+# Scale: 0.07
 
 # === ACTIVE POOL (20 distractors) ===
 
 # Forks (3)
-rc_fork_0:0.06
-rc_fork_1:0.06
-rc_fork_2:0.06
+rc_fork_0:0.07
+rc_fork_1:0.07
+rc_fork_2:0.07
 
 # Knives (3)
-rc_knife_0:0.06
-rc_knife_1:0.06
-rc_knife_2:0.06
+rc_knife_0:0.07
+rc_knife_1:0.07
+rc_knife_2:0.07
 
 # Spoons (3)
-rc_spoon_0:0.06
-rc_spoon_1:0.06
-rc_spoon_2:0.06
+rc_spoon_0:0.07
+rc_spoon_1:0.07
+rc_spoon_2:0.07
 
 # Spatulas (2)
-rc_spatula_0:0.06
-rc_spatula_1:0.06
+rc_spatula_0:0.07
+rc_spatula_1:0.07
 
 # Ladles (2)
-rc_ladle_0:0.06
-rc_ladle_1:0.06
+rc_ladle_0:0.07
+rc_ladle_1:0.07
 
 # Scissors (1)
-rc_scissors_0:0.06
+rc_scissors_0:0.07
 
 # Bowls (2)
-rc_bowl_0:0.06
-rc_bowl_1:0.06
+rc_bowl_0:0.07
+rc_bowl_1:0.07
 
 # Mugs (2)
-rc_mug_0:0.06
-rc_mug_1:0.06
+rc_mug_0:0.07
+rc_mug_1:0.07
 
 # Plates (2)
-rc_plate_0:0.06
-rc_plate_1:0.06
+rc_plate_0:0.07
+rc_plate_1:0.07
