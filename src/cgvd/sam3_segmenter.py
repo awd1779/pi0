@@ -225,7 +225,6 @@ class SAM3Segmenter:
 
         # Parse concepts into individual queries
         concept_list = self._parse_concepts(concepts)
-        print(f"[SAM3] Parsed concepts: {concept_list}")
 
         # Pre-compute vision embeddings for efficiency
         img_inputs = self.processor(images=pil_image, return_tensors="pt")
@@ -245,7 +244,7 @@ class SAM3Segmenter:
             mask, score, instance_masks = self._segment_single_concept(
                 pil_image, concept, vision_embeds, original_sizes, threshold,
             )
-            print(f"[SAM3] Concept '{concept}': score={score:.3f}, threshold={threshold:.2f}, coverage={mask.sum() / mask.size * 100:.1f}%, instances={len(instance_masks)}")
+            # Scores accessible via self.last_scores after call
 
             individual_masks[concept] = {"mask": mask, "score": score}
             # Store per-instance masks and scores for debug visualization
@@ -267,7 +266,7 @@ class SAM3Segmenter:
 
         # Binarize
         combined_mask = (combined_mask > 0.5).astype(np.float32)
-        print(f"[SAM3] Combined mask coverage: {combined_mask.sum() / combined_mask.size * 100:.1f}%")
+        # Coverage accessible via combined_mask after call
 
         self.last_segment_time = time.time() - start_time
 
