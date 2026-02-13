@@ -1046,6 +1046,8 @@ class DistractorWrapper:
 
         # Log how many distractors are visible after settling
         visible_count = self._count_visible_distractors(initial_positions)
+        self.last_visible_count = visible_count
+        self.last_total_count = len(self.distractor_objs)
         self._log(f"[Distractor] After settling: {visible_count}/{len(self.distractor_objs)} distractors on table")
 
         # Unlock task objects now that distractors have settled

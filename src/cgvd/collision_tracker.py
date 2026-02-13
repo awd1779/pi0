@@ -62,8 +62,7 @@ class CollisionTracker:
                     self._gripper_links.add(link)
                     self._gripper_link_names.add(link.name)
                     break
-        if self._gripper_link_names:
-            print(f"[CollisionTracker] Found gripper links: {self._gripper_link_names}")
+        pass  # gripper links identified silently
 
     def _identify_distractor_actors(self):
         """Identify distractor actors in the scene."""
@@ -80,8 +79,7 @@ class CollisionTracker:
                         self._distractor_actors.add(actor)
                         self._distractor_actor_names.add(actor_name)
                         break
-        if self._distractor_actor_names:
-            print(f"[CollisionTracker] Found distractor actors: {self._distractor_actor_names}")
+        pass  # distractor actors identified silently
 
     def reset(self):
         """Reset collision tracking state for new episode."""

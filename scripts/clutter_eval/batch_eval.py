@@ -28,9 +28,13 @@ import json
 import os
 import random
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
+
+# Suppress noisy gymnasium deprecation warnings
+warnings.filterwarnings("ignore", message=".*env\\..*to get variables from other wrappers is deprecated.*")
 
 import hydra
 import imageio
@@ -447,6 +451,27 @@ class BatchEvaluator:
                 break
         return None
 
+    def _get_distractor_info(self, env) -> Tuple[str, str]:
+        """Get placed count and spawned names from DistractorWrapper.
+
+        Returns:
+            (placed_str, names_str) e.g. ("2/2 placed", "corn, tomato")
+        """
+        from src.cgvd.distractor_wrapper import DistractorWrapper
+        current = env
+        while current is not None:
+            if isinstance(current, DistractorWrapper):
+                v = getattr(current, 'last_visible_count', None)
+                t = getattr(current, 'last_total_count', None)
+                placed = f"{v}/{t} placed" if v is not None and t is not None else ""
+                names = ", ".join(current.distractor_ids) if current.distractor_ids else ""
+                return placed, names
+            if hasattr(current, 'env'):
+                current = current.env
+            else:
+                break
+        return "", ""
+
     def run_configuration(self, config: EvalConfig, config_output_dir: Optional[str] = None) -> ConfigResult:
         """Run a single configuration (both baseline and CGVD).
 
@@ -481,7 +506,6 @@ class BatchEvaluator:
         if baseline_output:
             os.makedirs(baseline_output, exist_ok=True)
 
-        print(f"  Baseline: ", end="", flush=True)
         env = self._create_env(config, use_cgvd=False, output_dir=baseline_output)
         for ep_idx in range(config.num_episodes):
             result = self._run_episode(
@@ -493,12 +517,21 @@ class BatchEvaluator:
                 use_cgvd=False,
             )
             baseline_results.append(result)
-            print("+" if result.success else "-", end="", flush=True)
-            log_line = f"Episode {ep_idx+1}: {'SUCCESS' if result.success else 'FAILED'} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode})"
+            placed, names = self._get_distractor_info(env)
+            status = "SUCCESS" if result.success else "FAIL"
+            parts = [f"  Baseline  ep {ep_idx+1}/{config.num_episodes}"]
+            if placed:
+                parts.append(placed)
+            if names:
+                parts.append(f"[{names}]")
+            parts.append(f"{result.episode_time:.0f}s")
+            parts.append(status)
+            print("  ".join(parts))
+            log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode})"
             baseline_log_lines.append(log_line)
         env.close()
         b_ok = sum(1 for r in baseline_results if r.success)
-        print(f" {b_ok}/{config.num_episodes} ({b_ok/config.num_episodes*100:.0f}%)")
+        print(f"  Baseline  => {b_ok}/{config.num_episodes} ({b_ok/config.num_episodes*100:.0f}%)")
 
         # Run CGVD (only if distractors specified)
         if config.cgvd_distractor_names:
@@ -506,7 +539,6 @@ class BatchEvaluator:
             if cgvd_output:
                 os.makedirs(cgvd_output, exist_ok=True)
 
-            print(f"  CGVD:     ", end="", flush=True)
             env = self._create_env(config, use_cgvd=True, output_dir=cgvd_output)
             for ep_idx in range(config.num_episodes):
                 result = self._run_episode(
@@ -518,12 +550,21 @@ class BatchEvaluator:
                     use_cgvd=True,
                 )
                 cgvd_results.append(result)
-                print("+" if result.success else "-", end="", flush=True)
-                log_line = f"Episode {ep_idx+1}: {'SUCCESS' if result.success else 'FAILED'} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode}, cgvd={result.cgvd_time:.2f}s)"
+                placed, names = self._get_distractor_info(env)
+                status = "SUCCESS" if result.success else "FAIL"
+                parts = [f"  CGVD      ep {ep_idx+1}/{config.num_episodes}"]
+                if placed:
+                    parts.append(placed)
+                if names:
+                    parts.append(f"[{names}]")
+                parts.append(f"{result.episode_time:.0f}s")
+                parts.append(status)
+                print("  ".join(parts))
+                log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode}, cgvd={result.cgvd_time:.2f}s)"
                 cgvd_log_lines.append(log_line)
             env.close()
             c_ok = sum(1 for r in cgvd_results if r.success)
-            print(f" {c_ok}/{config.num_episodes} ({c_ok/config.num_episodes*100:.0f}%)")
+            print(f"  CGVD      => {c_ok}/{config.num_episodes} ({c_ok/config.num_episodes*100:.0f}%)")
         else:
             cgvd_results = baseline_results  # Copy baseline results if no distractors
 
@@ -549,6 +590,9 @@ class BatchEvaluator:
             baseline_results=baseline_results,
             cgvd_results=cgvd_results,
         )
+
+        if config.cgvd_distractor_names:
+            print(f"  Delta: Baseline {result.baseline_rate:.0f}% -> CGVD {result.cgvd_rate:.0f}% ({result.improvement:+.0f}%)")
 
         return result
 
