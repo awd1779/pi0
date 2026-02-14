@@ -289,7 +289,13 @@ class BatchEvaluator:
         self.env_adapter.reset()
 
         episode_id = (seed + episode_idx) % 24
-        env_reset_options = {"obj_init_options": {"episode_id": episode_id}}
+        distractor_seed = seed * 10000 + episode_idx  # unique per (run, episode)
+        env_reset_options = {
+            "obj_init_options": {
+                "episode_id": episode_id,
+                "distractor_seed": distractor_seed,
+            }
+        }
         obs, _ = env.reset(options=env_reset_options)
         instruction = env.unwrapped.get_language_instruction()
 

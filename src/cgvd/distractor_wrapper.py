@@ -953,14 +953,15 @@ class DistractorWrapper:
 
         # Sample distractors for this episode if randomization is enabled
         if self.randomize_per_episode and self.num_distractors is not None:
-            episode_id = kwargs.get("options", {}).get("obj_init_options", {}).get("episode_id", 0)
-            rng = np.random.RandomState(episode_id)
+            obj_opts = kwargs.get("options", {}).get("obj_init_options", {})
+            distractor_seed = obj_opts.get("distractor_seed", obj_opts.get("episode_id", 0))
+            rng = np.random.RandomState(distractor_seed)
             n_sample = min(self.num_distractors, len(self.distractor_pool))
 
             # Sample without replacement
             indices = rng.choice(len(self.distractor_pool), size=n_sample, replace=False)
             self.distractor_ids = [self.distractor_pool[i] for i in indices]
-            self._log(f"[Distractor] Episode {episode_id}: sampled {self.distractor_ids}")
+            self._log(f"[Distractor] seed={distractor_seed}: sampled {self.distractor_ids}")
 
         obs, info = self.env.reset(**kwargs)
 
@@ -968,7 +969,9 @@ class DistractorWrapper:
         self._load_distractors()
 
         # Position them randomly (spawns 0.5m above table)
-        rng = np.random.RandomState(kwargs.get("options", {}).get("obj_init_options", {}).get("episode_id", 0))
+        obj_opts = kwargs.get("options", {}).get("obj_init_options", {})
+        distractor_seed = obj_opts.get("distractor_seed", obj_opts.get("episode_id", 0))
+        rng = np.random.RandomState(distractor_seed)
         safety_bubbles, grid_bounds = self._position_distractors(rng)
 
         # Lock task objects so distractor physics can't push them

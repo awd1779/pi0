@@ -1,38 +1,38 @@
 # Utensil distractors for spoon task (widowx_spoon_on_towel)
 # Pool size: 20 (RoboCasa only)
 # Category: utensils - forks, knives, spatulas, scissors
-# Scale: RoboCasa objects use 0.15
+# Scale: RoboCasa objects use 0.1
 
 # === ACTIVE POOL (20 distractors) ===
 
 # Forks (4)
-rc_fork_0:0.15
-rc_fork_1:0.15
-rc_fork_4:0.15
-rc_fork_7:0.15
+rc_fork_0:0.1
+rc_fork_1:0.1
+rc_fork_4:0.1
+rc_fork_7:0.1
 rc_fork_11:0.1
 
 # Knives (5)
-rc_knife_0:0.15
-rc_knife_7:0.15
-rc_knife_20:0.15
-rc_knife_23:0.15
-rc_knife_25:0.15
+rc_knife_0:0.1
+rc_knife_7:0.1
+rc_knife_20:0.1
+rc_knife_23:0.1
+rc_knife_25:0.1
 
 
 # Spatulas (5)
-rc_spatula_1:0.15
-rc_spatula_4:0.15
-rc_spatula_8:0.15
-rc_spatula_11:0.15
-rc_spatula_3:0.15
+rc_spatula_1:0.1
+rc_spatula_4:0.1
+rc_spatula_8:0.1
+rc_spatula_11:0.1
+rc_spatula_3:0.1
 
 # Scissors (5)
-rc_scissors_0:0.15
-rc_scissors_6:0.15
-rc_scissors_12:0.15
-rc_scissors_4:0.15
-rc_scissors_8:0.15
+rc_scissors_0:0.1
+rc_scissors_6:0.1
+rc_scissors_12:0.1
+rc_scissors_4:0.1
+rc_scissors_8:0.1
 
 # === RESERVE POOL (remaining RC utensils) ===
 

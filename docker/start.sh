@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# --- Symlinks to /workspace (re-created every boot, volume mount breaks them) ---
+mkdir -p /workspace/checkpoints /workspace/logs
+rm -rf /app/open-pi-zero/checkpoints /app/open-pi-zero/logs
+ln -sf /workspace/checkpoints /app/open-pi-zero/checkpoints
+ln -sf /workspace/logs /app/open-pi-zero/logs
+echo "Symlinks: checkpoints/ and logs/ -> /workspace"
+
 # --- HuggingFace authentication (for gated models like SAM3) ---
 HF_TOKEN_FILE="/workspace/cache/huggingface/token"
 if [ -n "$HF_TOKEN" ]; then
