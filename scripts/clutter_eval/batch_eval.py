@@ -246,7 +246,7 @@ class BatchEvaluator:
             )
 
         # Optionally wrap with CGVD
-        if use_cgvd and config.cgvd_distractor_names:
+        if use_cgvd:
             from src.cgvd import CGVDWrapper
 
             # Set up debug directory for CGVD
@@ -539,46 +539,42 @@ class BatchEvaluator:
         b_ok = sum(1 for r in baseline_results if r.success)
         print(f"  Baseline  => {b_ok}/{config.num_episodes} ({b_ok/config.num_episodes*100:.0f}%)")
 
-        # Run CGVD (only if distractors specified)
-        if config.cgvd_distractor_names:
-            cgvd_output = os.path.join(run_dir, "cgvd") if run_dir else None
-            if cgvd_output:
-                os.makedirs(cgvd_output, exist_ok=True)
+        # Run CGVD
+        cgvd_output = os.path.join(run_dir, "cgvd") if run_dir else None
+        if cgvd_output:
+            os.makedirs(cgvd_output, exist_ok=True)
 
-            env = self._create_env(config, use_cgvd=True, output_dir=cgvd_output)
-            for ep_idx in range(config.num_episodes):
-                result = self._run_episode(
-                    env, ep_idx, config.seed,
-                    mode="cgvd",
-                    output_dir=cgvd_output,
-                    task=config.task,
-                    category=config.category,
-                    use_cgvd=True,
-                )
-                cgvd_results.append(result)
-                placed, names = self._get_distractor_info(env)
-                status = "SUCCESS" if result.success else "FAIL"
-                parts = [f"  CGVD      ep {ep_idx+1}/{config.num_episodes}"]
-                if placed:
-                    parts.append(placed)
-                if names:
-                    parts.append(f"[{names}]")
-                parts.append(f"{result.episode_time:.0f}s")
-                parts.append(status)
-                print("  ".join(parts))
-                log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode}, cgvd={result.cgvd_time:.2f}s)"
-                cgvd_log_lines.append(log_line)
-            env.close()
-            c_ok = sum(1 for r in cgvd_results if r.success)
-            print(f"  CGVD      => {c_ok}/{config.num_episodes} ({c_ok/config.num_episodes*100:.0f}%)")
-        else:
-            cgvd_results = baseline_results  # Copy baseline results if no distractors
+        env = self._create_env(config, use_cgvd=True, output_dir=cgvd_output)
+        for ep_idx in range(config.num_episodes):
+            result = self._run_episode(
+                env, ep_idx, config.seed,
+                mode="cgvd",
+                output_dir=cgvd_output,
+                task=config.task,
+                category=config.category,
+                use_cgvd=True,
+            )
+            cgvd_results.append(result)
+            placed, names = self._get_distractor_info(env)
+            status = "SUCCESS" if result.success else "FAIL"
+            parts = [f"  CGVD      ep {ep_idx+1}/{config.num_episodes}"]
+            if placed:
+                parts.append(placed)
+            if names:
+                parts.append(f"[{names}]")
+            parts.append(f"{result.episode_time:.0f}s")
+            parts.append(status)
+            print("  ".join(parts))
+            log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode}, cgvd={result.cgvd_time:.2f}s)"
+            cgvd_log_lines.append(log_line)
+        env.close()
+        c_ok = sum(1 for r in cgvd_results if r.success)
+        print(f"  CGVD      => {c_ok}/{config.num_episodes} ({c_ok/config.num_episodes*100:.0f}%)")
 
         # Save log files
         if run_dir:
             self._save_log_file(baseline_log_lines, baseline_results, run_dir, "baseline", config)
-            if config.cgvd_distractor_names:
-                self._save_log_file(cgvd_log_lines, cgvd_results, run_dir, "cgvd", config)
+            self._save_log_file(cgvd_log_lines, cgvd_results, run_dir, "cgvd", config)
 
         # Clean up
         torch.cuda.empty_cache()
@@ -597,8 +593,7 @@ class BatchEvaluator:
             cgvd_results=cgvd_results,
         )
 
-        if config.cgvd_distractor_names:
-            print(f"  Delta: Baseline {result.baseline_rate:.0f}% -> CGVD {result.cgvd_rate:.0f}% ({result.improvement:+.0f}%)")
+        print(f"  Delta: Baseline {result.baseline_rate:.0f}% -> CGVD {result.cgvd_rate:.0f}% ({result.improvement:+.0f}%)")
 
         return result
 
@@ -987,7 +982,7 @@ def generate_configs(args) -> List[EvalConfig]:
                     num_episodes=args.episodes,
                     run_index=run_idx,
                     distractors=distractors,
-                    cgvd_distractor_names=cgvd_names if num_dist > 0 else [],
+                    cgvd_distractor_names=cgvd_names,
                     randomize_distractors=args.randomize_distractors,
                     distractor_pool_size=len(distractors),
                 ))

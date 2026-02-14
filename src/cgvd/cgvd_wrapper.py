@@ -126,7 +126,8 @@ class CGVDWrapper(gym.Wrapper):
         self.blend_sigma = blend_sigma
         self.lama_dilation = lama_dilation
         self.safe_dilation = safe_dilation
-        self._reinforce_size = self.safe_dilation + 2 * int(np.ceil(self.blend_sigma))
+        self._step4_safe_dilation = max(self.safe_dilation, self.lama_dilation)
+        self._reinforce_size = self._step4_safe_dilation + 3 * int(np.ceil(self.blend_sigma))
         self.cache_refresh_interval = cache_refresh_interval
 
         # Ablation flags
@@ -163,6 +164,7 @@ class CGVDWrapper(gym.Wrapper):
 
         # State - masks
         self.cached_mask: Optional[np.ndarray] = None
+        self.cached_compositing_mask: Optional[np.ndarray] = None  # Undilated distractor mask for compositing (no lama_dilation)
         self.cached_distractor_mask: Optional[np.ndarray] = None  # Raw distractor mask before subtraction
         self.cached_safe_mask: Optional[np.ndarray] = None  # Combined safe set (derived: max(target, anchor))
         self.cached_target_mask: Optional[np.ndarray] = None  # Target only (e.g., spoon)
@@ -540,6 +542,7 @@ class CGVDWrapper(gym.Wrapper):
 
         # Clear cached state
         self.cached_mask = None
+        self.cached_compositing_mask = None
         self.cached_distractor_mask = None
         self.cached_safe_mask = None
         self.cached_target_mask = None
@@ -682,11 +685,18 @@ class CGVDWrapper(gym.Wrapper):
         # Step 2: Distractor mask - accumulate during warm-up period
         # Stricter threshold reduces false positives (carrot detected as banana)
         seg_start = time.time()
-        safe_query_image = image  # default; overridden with robot-free image during warmup
         distractor_concepts = ". ".join(self.distractor_names)
 
         # Determine if we should recompute distractor mask
         in_warmup = self.frame_count < self.safeset_warmup_frames
+
+        # During warmup, render robot-free image so SAM3 sees distractors
+        # unoccluded by the robot arm.  Reused for safe-set query below.
+        if in_warmup:
+            safe_query_image = self._render_robot_free_image(camera_name)
+            self._log("[CGVD] Using robot-free image for distractor and safe-set queries")
+        else:
+            safe_query_image = image
         should_recompute = (
             self.cached_distractor_mask is None or  # First frame
             in_warmup or  # Warm-up period: accumulate detections
@@ -694,7 +704,7 @@ class CGVDWrapper(gym.Wrapper):
         )
         if should_recompute:
             raw_distractor_mask = self.segmenter.segment(
-                image, distractor_concepts, presence_threshold=self.distractor_presence_threshold
+                safe_query_image, distractor_concepts, presence_threshold=self.distractor_presence_threshold
             )
             self.distractor_scores = self.segmenter.last_scores.copy()
             self.distractor_individual_masks = self.segmenter.last_individual_masks.copy()
@@ -745,16 +755,8 @@ class CGVDWrapper(gym.Wrapper):
                     include_robot=False,  # Robot tracked separately
                 )
 
-                # During warmup, hide robot and re-render so SAM3 sees the
-                # real target unoccluded.  Without this, the robot arm over
-                # the real spoon suppresses its SAM3 score, letting the
-                # spatula (fully visible) win top-1 and lock into the
-                # safe-set.
-                if in_warmup:
-                    safe_query_image = self._render_robot_free_image(camera_name)
-                    self._log("[CGVD] Using robot-free image for safe-set query")
-                else:
-                    safe_query_image = image
+                # safe_query_image was set earlier: robot-free during warmup,
+                # raw observation otherwise.
 
                 raw_target_mask = self.segmenter.segment(
                     safe_query_image, safe_concepts, presence_threshold=self.presence_threshold
@@ -878,13 +880,16 @@ class CGVDWrapper(gym.Wrapper):
         # Uses cached_safe_mask (target+anchor only) instead of safe_mask
         # (which includes the robot). This makes cached_mask stable across
         # frames — robot visibility is handled in _composite() via re-enforcement.
-        if self.safe_dilation > 0:
-            safe_dilation_kernel = np.ones((self.safe_dilation, self.safe_dilation), np.uint8)
+        if self._step4_safe_dilation > 0:
+            safe_dilation_kernel = np.ones((self._step4_safe_dilation, self._step4_safe_dilation), np.uint8)
             safe_mask_for_gating = cv2.dilate(
                 (self.cached_safe_mask > 0.5).astype(np.uint8), safe_dilation_kernel, iterations=1
             ).astype(np.float32)
         else:
             safe_mask_for_gating = (self.cached_safe_mask > 0.5).astype(np.float32)
+
+        # Save undilated distractor for compositing mask (before lama_dilation)
+        undilated_distractor = (distractor_mask > 0.5).astype(np.float32)
 
         # Step 3.5: Dilate distractor mask BEFORE safe-set subtraction
         # This ensures dilation is gated by the safe-set (task objects never bleed in)
@@ -900,6 +905,14 @@ class CGVDWrapper(gym.Wrapper):
         # Uses dilated safe mask to provide protective buffer around target edges
         self.cached_mask = np.logical_and(
             distractor_mask > 0.5, safe_mask_for_gating < 0.5
+        ).astype(np.float32)
+
+        # Compositing mask: undilated distractor AND NOT safe
+        # Uses the pre-dilation distractor mask so GaussianBlur transition
+        # starts at the actual distractor boundary, not lama_dilation px beyond it.
+        # Mechanism 2 (raw cached_distractor_mask) handles the core distractor pixels.
+        self.cached_compositing_mask = np.logical_and(
+            undilated_distractor > 0.5, safe_mask_for_gating < 0.5
         ).astype(np.float32)
 
         seg_time = time.time() - seg_start
@@ -972,7 +985,7 @@ class CGVDWrapper(gym.Wrapper):
             # Composite non-distractor regions from current frame
             # - Distractor regions: show cached inpainted background (distractors removed)
             # - Non-distractor regions: show current frame (robot + target move naturally)
-            distilled = self._composite(image, self.cached_inpainted_image, self.cached_mask)
+            distilled = self._composite(image, self.cached_inpainted_image, self.cached_compositing_mask)
             if self.verbose:
                 print(f"[CGVD] Using cached inpainting with scene composite (frame {self.frame_count})")
 
