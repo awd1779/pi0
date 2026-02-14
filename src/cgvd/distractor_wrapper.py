@@ -567,7 +567,7 @@ class DistractorWrapper:
 
         # --- Grid-based placement ---
         # Fixed grid over placement area: one object per cell guarantees no overlap
-        CELL_SIZE = 0.06  # 6cm x 6cm cells (fits largest utensil ~4cm with 2cm margin)
+        CELL_SIZE = 0.04  # 4cm cells — more grid resolution to avoid overflow with safety bubbles
         JITTER = 0.01     # Up to 1cm random offset within cell for natural appearance
 
         area_w = X_MAX - X_MIN
@@ -717,6 +717,8 @@ class DistractorWrapper:
 
         for obj in self.distractor_objs:
             pos = obj.pose.p
+            if pos[2] < -1.0:
+                continue  # Intentional overflow — don't resurrect
             if pos[2] < surface_height:
                 # Object clipped into/through the surface - reposition it
                 new_z = surface_height + 0.05  # 5cm above surface
