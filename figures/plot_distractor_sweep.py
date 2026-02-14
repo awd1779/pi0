@@ -57,38 +57,67 @@ PANELS = [
 ROW_LABELS = ["Spoon on Towel", "Carrot on Plate"]
 COL_LABELS = ["Semantic Distractors", "Random Distractors"]
 
+# ---------- Hardcoded data from Results Tables.md ----------
+# Format: {nd: {"baseline": [val], "cgvd": [val], "baseline_hard": [val], "cgvd_hard": [val]}}
+HARDCODED = {
+    ("spoon", "semantic"): {
+        2:  {"baseline": [65.5], "cgvd": [69.5], "baseline_hard": [59.0], "cgvd_hard": [69.5]},
+        4:  {"baseline": [62.5], "cgvd": [65.0], "baseline_hard": [50.5], "cgvd_hard": [65.0]},
+        6:  {"baseline": [58.0], "cgvd": [64.5], "baseline_hard": [50.0], "cgvd_hard": [63.5]},
+        8:  {"baseline": [52.0], "cgvd": [66.5], "baseline_hard": [43.5], "cgvd_hard": [66.0]},
+        10: {"baseline": [44.5], "cgvd": [58.0], "baseline_hard": [40.0], "cgvd_hard": [56.5]},
+        12: {"baseline": [44.5], "cgvd": [67.0], "baseline_hard": [39.0], "cgvd_hard": [66.0]},
+        14: {"baseline": [47.5], "cgvd": [63.5], "baseline_hard": [42.0], "cgvd_hard": [61.5]},
+    },
+    ("spoon", "control"): {
+        2:  {"baseline": [75.0], "cgvd": [65.0], "baseline_hard": [74.5], "cgvd_hard": [65.0]},
+        4:  {"baseline": [76.5], "cgvd": [64.5], "baseline_hard": [75.5], "cgvd_hard": [63.5]},
+        6:  {"baseline": [68.0], "cgvd": [64.5], "baseline_hard": [66.5], "cgvd_hard": [64.0]},
+        8:  {"baseline": [70.5], "cgvd": [66.5], "baseline_hard": [68.5], "cgvd_hard": [66.0]},
+        10: {"baseline": [68.0], "cgvd": [68.5], "baseline_hard": [65.0], "cgvd_hard": [67.0]},
+        12: {"baseline": [58.5], "cgvd": [67.5], "baseline_hard": [55.0], "cgvd_hard": [67.5]},
+        14: {"baseline": [57.5], "cgvd": [65.5], "baseline_hard": [52.5], "cgvd_hard": [63.0]},
+    },
+}
+
 
 def load_condition(task_short: str, category: str) -> dict:
-    """Load all distractor-count conditions for a (task, category) pair."""
+    """Load all distractor-count conditions for a (task, category) pair.
+
+    Tries CSV files first; falls back to HARDCODED data.
+    """
     cat_dir = BASE_DIR / task_short / category
-    if not cat_dir.exists():
-        return {}
-
     results = {}
-    for run_dir in sorted(cat_dir.iterdir()):
-        if not run_dir.is_dir():
-            continue
-        summary = run_dir / "summary.csv"
-        if not summary.exists():
-            continue
 
-        m = re.match(r"n(\d+)_", run_dir.name)
-        if not m:
-            continue
-        nd = int(m.group(1))
+    if cat_dir.exists():
+        for run_dir in sorted(cat_dir.iterdir()):
+            if not run_dir.is_dir():
+                continue
+            summary = run_dir / "summary.csv"
+            if not summary.exists():
+                continue
 
-        with open(summary) as f:
-            rows = list(csv.DictReader(f))
+            m = re.match(r"n(\d+)_", run_dir.name)
+            if not m:
+                continue
+            nd = int(m.group(1))
 
-        if not rows:
-            continue
+            with open(summary) as f:
+                rows = list(csv.DictReader(f))
 
-        results[nd] = {
-            "baseline": [float(r["baseline_success_rate"]) for r in rows],
-            "cgvd": [float(r["cgvd_success_rate"]) for r in rows],
-            "baseline_hard": [float(r["baseline_hard_success_rate"]) for r in rows],
-            "cgvd_hard": [float(r["cgvd_hard_success_rate"]) for r in rows],
-        }
+            if not rows:
+                continue
+
+            results[nd] = {
+                "baseline": [float(r["baseline_success_rate"]) for r in rows],
+                "cgvd": [float(r["cgvd_success_rate"]) for r in rows],
+                "baseline_hard": [float(r["baseline_hard_success_rate"]) for r in rows],
+                "cgvd_hard": [float(r["cgvd_hard_success_rate"]) for r in rows],
+            }
+
+    # Fall back to hardcoded data if no CSVs found
+    if not results:
+        results = HARDCODED.get((task_short, category), {})
 
     return results
 

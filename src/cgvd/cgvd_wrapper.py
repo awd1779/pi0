@@ -46,7 +46,6 @@ class CGVDWrapper(gym.Wrapper):
         robot_presence_threshold: float = 0.05,
         distractor_presence_threshold: float = 0.3,
         safeset_warmup_frames: int = 5,
-        deferred_detection_frames: int = 10,
         # Compositing parameters
         blend_sigma: float = 3.0,
         lama_dilation: int = 11,
@@ -115,7 +114,6 @@ class CGVDWrapper(gym.Wrapper):
         self.robot_presence_threshold = robot_presence_threshold
         self.distractor_presence_threshold = distractor_presence_threshold
         self.safeset_warmup_frames = safeset_warmup_frames
-        self.deferred_detection_frames = deferred_detection_frames
         # Safe-set robustness parameters
         self.genuineness_margin = genuineness_margin
         self.iou_gate_threshold = iou_gate_threshold
@@ -173,11 +171,8 @@ class CGVDWrapper(gym.Wrapper):
         self.last_robot_mask: Optional[np.ndarray] = None  # Store robot mask for compositing
         self.cached_robot_mask: Optional[np.ndarray] = None  # Accumulated robot mask from warmup
         self.current_safe_mask: Optional[np.ndarray] = None  # Per-frame safe mask (target + anchor + robot)
-        self._target_detected_in_warmup: bool = False  # Whether the target specifically was detected during warmup
         self._target_votes: Optional[np.ndarray] = None  # Per-pixel vote count for target
         self._anchor_votes: Optional[np.ndarray] = None  # Per-pixel vote count for anchor
-        self._deferred_was_active: bool = False  # Whether deferred detection was ever active
-        self._deferred_cleanup_done: bool = False  # Whether post-deferred cleanup has run
 
         # State - confidence scores and individual masks for debug display
         self.distractor_scores: Dict[str, float] = {}
@@ -398,12 +393,11 @@ class CGVDWrapper(gym.Wrapper):
 
         return false_positive_mask
 
-    def _accumulate_target(self, target_mask: np.ndarray, in_deferred: bool = False):
+    def _accumulate_target(self, target_mask: np.ndarray):
         """Accumulate a target detection with IoU spatial gating (Layer 2).
 
         Args:
             target_mask: Binary mask for this frame's target detection
-            in_deferred: Whether we're in deferred detection mode
         """
         new_binary = (target_mask > 0.5)
         if new_binary.sum() < self.min_component_pixels:
@@ -416,10 +410,10 @@ class CGVDWrapper(gym.Wrapper):
             self._log("[CGVD] Layer 2: target anchor initialized")
             return
 
-        # IoU gating: skip on early frames and during deferred detection
+        # IoU gating: skip on early frames
         early_frame = self.frame_count < self.iou_gate_start_frame
 
-        if early_frame or in_deferred:
+        if early_frame:
             # Accumulate unconditionally
             self.cached_target_mask = np.maximum(self.cached_target_mask, target_mask)
             if self._target_votes is None:
@@ -551,11 +545,8 @@ class CGVDWrapper(gym.Wrapper):
         self.last_robot_mask = None
         self.cached_robot_mask = None
         self.current_safe_mask = None
-        self._target_detected_in_warmup = False
         self._target_votes = None
         self._anchor_votes = None
-        self._deferred_was_active = False
-        self._deferred_cleanup_done = False
         self.distractor_scores = {}
         self.safe_scores = {}
         self.frame_count = 0
@@ -742,13 +733,7 @@ class CGVDWrapper(gym.Wrapper):
         else:
             # Step 3a: Target + anchor mask - accumulate during warm-up period
             in_warmup = self.frame_count < self.safeset_warmup_frames
-            in_deferred = (
-                not self._target_detected_in_warmup
-                and self.frame_count >= self.safeset_warmup_frames
-                and self.frame_count < self.safeset_warmup_frames + self.deferred_detection_frames
-            )
-
-            if self.cached_safe_mask is None or in_warmup or in_deferred:
+            if self.cached_safe_mask is None or in_warmup:
                 safe_concepts = self.parser.build_concept_prompt(
                     self.current_target,
                     self.current_anchor,
@@ -794,25 +779,11 @@ class CGVDWrapper(gym.Wrapper):
                 scores_str = ", ".join(f"{k}={v:.3f}" for k, v in self.safe_scores.items())
                 self._log(f"[CGVD] Frame {self.frame_count} Safe-set scores (filtered): {scores_str}")
 
-                # Track whether the target specifically was detected during warmup.
-                if not self._target_detected_in_warmup and self.current_target:
-                    for key, score in self.safe_scores.items():
-                        base = key.rsplit('_', 1)[0] if '_' in key and key.rsplit('_', 1)[1].isdigit() else key
-                        if base == self.current_target and score >= self.presence_threshold:
-                            self._target_detected_in_warmup = True
-                            phase = "warmup" if in_warmup else "deferred detection"
-                            self._log(f"[CGVD] Target '{self.current_target}' detected in {phase} (key='{key}', score={score:.3f})")
-                            break
-
-                # Track deferred detection activity
-                if in_deferred:
-                    self._deferred_was_active = True
-
                 # Split by concept and accumulate per-concept
                 for name, mask in filtered_masks.items():
                     base = name.rsplit('_', 1)[0] if '_' in name and name.rsplit('_', 1)[1].isdigit() else name
                     if base == self.current_target:
-                        self._accumulate_target(mask, in_deferred)
+                        self._accumulate_target(mask)
                     else:
                         # Anchor: accumulate unconditionally (never filtered)
                         if self.cached_anchor_mask is None:
@@ -836,21 +807,9 @@ class CGVDWrapper(gym.Wrapper):
                     self._cleanup_target_mask()
                     self._recompute_cached_safe_mask(raw_target_mask.shape)
 
-                # Post-deferred cleanup: run once when deferred window expires
-                is_deferred_end = (
-                    not in_warmup and not in_deferred
-                    and self._deferred_was_active
-                    and not self._deferred_cleanup_done
-                )
-                if is_deferred_end:
-                    self._log("[CGVD] Running post-deferred cleanup")
-                    self._cleanup_target_mask()
-                    self._recompute_cached_safe_mask(raw_target_mask.shape)
-                    self._deferred_cleanup_done = True
-
                 if self.verbose:
                     cov = self.cached_safe_mask.sum() / self.cached_safe_mask.size * 100 if self.cached_safe_mask is not None else 0
-                    status = "accumulating" if in_warmup else ("deferred" if in_deferred else "frozen")
+                    status = "accumulating" if in_warmup else "frozen"
                     print(f"[CGVD] Safe-set mask: {cov:.1f}% (frame {self.frame_count}, {status})")
 
             # Step 3b: Robot mask - tracked every frame
@@ -952,20 +911,6 @@ class CGVDWrapper(gym.Wrapper):
             self.last_cgvd_time = time.time() - cgvd_start
             self.total_cgvd_time += self.last_cgvd_time
             return obs
-
-        # Deferred target detection: if the target wasn't detected during warmup
-        # (likely occluded by robot gripper), continue compositing anyway and keep
-        # trying to detect it in post-warmup frames. This is safe because:
-        # - SAM3 never segmented the occluded target as a distractor → not in cached_mask
-        # - The target shows through the composite naturally at mask=0 pixels
-        # - When the robot moves and reveals the target, deferred detection adds it
-        #   to cached_safe_mask for explicit protection
-        if (self.frame_count == self.safeset_warmup_frames + 1
-                and not self._target_detected_in_warmup):
-            self._log(
-                f"[CGVD] WARNING: Target '{self.current_target}' not detected during warmup "
-                f"(deferred detection for {self.deferred_detection_frames} frames)"
-            )
 
         # Apply visual distillation to remove distractors
         # Clean plate is pre-computed during warmup from the real image.

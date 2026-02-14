@@ -175,25 +175,6 @@ if frame_count == safeset_warmup_frames:
 
 The clean plate is computed once and reused for all subsequent frames. The inpaint mask includes both distractors and the robot (see Section 10).
 
-### 4.4 Deferred Detection
-
-If the target was not detected during warmup (likely occluded by the gripper), CGVD enters a deferred detection window:
-
-```python
-in_deferred = (
-    not target_detected_in_warmup
-    and frame_count >= safeset_warmup_frames
-    and frame_count < safeset_warmup_frames + deferred_detection_frames  # default: 10 extra frames
-)
-```
-
-During deferred detection:
-- Compositing is **active** (VLA sees distilled frames)
-- Safe-set accumulation continues (target may become visible as robot moves)
-- When the deferred window expires, Layer 3 cleanup runs (see Section 6.4)
-
-This is safe because: if SAM3 never detected the occluded target as a distractor, those pixels are not in `cached_mask`, so the target shows through naturally at `mask=0` pixels.
-
 ---
 
 ## 5. Distractor Mask Accumulation
@@ -293,7 +274,6 @@ After filtering, the surviving target mask is accumulated into `cached_target_ma
 |-----------|----------|
 | First detection ever | Initialize `cached_target_mask` and per-pixel vote counter |
 | Early frames (`frame < iou_gate_start_frame`, default: 2) | Accumulate unconditionally |
-| Deferred detection mode | Accumulate unconditionally |
 | Normal warmup frames | Compute IoU between new detection and `cached_target_mask`. If `IoU > iou_gate_threshold` (default: 0.15), accumulate. Otherwise, reject. |
 
 **Per-pixel vote tracking**: Each time a pixel is accumulated, its vote counter is incremented:
@@ -338,7 +318,6 @@ The real spoon wins decisively.
 
 **Trigger conditions:**
 - Runs once at the end of warmup (last warmup frame)
-- Runs again when the deferred detection window expires (if deferred detection was active)
 
 After cleanup, `_recompute_cached_safe_mask()` merges the cleaned target with the anchor:
 ```python
@@ -640,7 +619,6 @@ The inpainter uses a singleton pattern with lazy model loading to avoid redundan
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `safeset_warmup_frames` | 5 | Number of no-op frames for mask accumulation |
-| `deferred_detection_frames` | 10 | Extra frames to detect occluded target post-warmup |
 
 ### 12.4 Compositing Parameters
 
