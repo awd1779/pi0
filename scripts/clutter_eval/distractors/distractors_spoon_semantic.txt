@@ -34,6 +34,13 @@ rc_scissors_12:0.1
 rc_scissors_4:0.1
 rc_scissors_8:0.1
 
+# Ladles 5
+rc_ladle_0:0.1
+rc_ladle_1:0.1
+rc_ladle_2:0.1
+rc_ladle_3:0.1
+rc_ladle_4:0.1
+
 # === RESERVE POOL (remaining RC utensils) ===
 
 # Additional Forks
@@ -80,12 +87,7 @@ rc_scissors_8:0.1
 #rc_spatula_12:0.1
 #rc_spatula_13:0.1
 
-# Ladles (excluded)
-#rc_ladle_0:0.1
-#rc_ladle_1:0.1
-#rc_ladle_2:0.1
-#rc_ladle_3:0.1
-#rc_ladle_4:0.1
+
 
 # Additional Scissors
 #rc_scissors_1:0.1

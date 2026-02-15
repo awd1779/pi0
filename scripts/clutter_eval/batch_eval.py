@@ -36,12 +36,14 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 # Suppress noisy gymnasium deprecation warnings
 warnings.filterwarnings("ignore", message=".*env\\..*to get variables from other wrappers is deprecated.*")
 
+import cv2
 import hydra
 import imageio
 import numpy as np
 import simpler_env
 import torch
 from omegaconf import OmegaConf
+from simpler_env.utils.env.observation_utils import get_image_from_maniskill2_obs_dict
 
 from src.model.vla.pizero import PiZeroInference
 
@@ -320,10 +322,23 @@ class BatchEvaluator:
             video_writer = imageio.get_writer(video_path, fps=10)
 
         cnt_step = 0
+        inference_step = 0
         inference_times = []
         success = False
 
+        # Set up frame saving for baseline/CGVD comparison
+        frames_dir = None
+        if self.cgvd_save_debug and output_dir:
+            frames_dir = os.path.join(output_dir, "frames", f"episode_{episode_idx:03d}")
+            os.makedirs(frames_dir, exist_ok=True)
+
         while True:
+            # Save raw observation frame for baseline vs CGVD comparison
+            if frames_dir is not None:
+                raw_image = get_image_from_maniskill2_obs_dict(env, obs)
+                frame_path = os.path.join(frames_dir, f"frame_{inference_step:04d}.png")
+                cv2.imwrite(frame_path, cv2.cvtColor(raw_image, cv2.COLOR_RGB2BGR))
+
             inputs = self.env_adapter.preprocess(env, obs, instruction)
             causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
                 self.model.build_causal_mask_and_position_ids(
@@ -379,6 +394,8 @@ class BatchEvaluator:
 
                 if truncated:
                     break
+
+            inference_step += 1
 
             new_instruction = env.unwrapped.get_language_instruction()
             if new_instruction != instruction:
@@ -571,6 +588,10 @@ class BatchEvaluator:
         c_ok = sum(1 for r in cgvd_results if r.success)
         print(f"  CGVD      => {c_ok}/{config.num_episodes} ({c_ok/config.num_episodes*100:.0f}%)")
 
+        # Generate baseline vs CGVD comparison images
+        if self.cgvd_save_debug and run_dir:
+            self._generate_frame_comparisons(run_dir, config.num_episodes)
+
         # Save log files
         if run_dir:
             self._save_log_file(baseline_log_lines, baseline_results, run_dir, "baseline", config)
@@ -596,6 +617,82 @@ class BatchEvaluator:
         print(f"  Delta: Baseline {result.baseline_rate:.0f}% -> CGVD {result.cgvd_rate:.0f}% ({result.improvement:+.0f}%)")
 
         return result
+
+    def _generate_frame_comparisons(self, run_dir: str, num_episodes: int):
+        """Generate side-by-side comparison images of baseline vs CGVD frames."""
+        baseline_frames_root = os.path.join(run_dir, "baseline", "frames")
+        cgvd_frames_root = os.path.join(run_dir, "cgvd", "frames")
+        comparison_dir = os.path.join(run_dir, "frame_comparison")
+
+        if not os.path.exists(baseline_frames_root) or not os.path.exists(cgvd_frames_root):
+            return
+
+        os.makedirs(comparison_dir, exist_ok=True)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        for ep_idx in range(num_episodes):
+            ep_name = f"episode_{ep_idx:03d}"
+            baseline_ep_dir = os.path.join(baseline_frames_root, ep_name)
+            cgvd_ep_dir = os.path.join(cgvd_frames_root, ep_name)
+
+            if not os.path.exists(baseline_ep_dir) or not os.path.exists(cgvd_ep_dir):
+                continue
+
+            ep_comparison_dir = os.path.join(comparison_dir, ep_name)
+            os.makedirs(ep_comparison_dir, exist_ok=True)
+
+            baseline_frames = sorted(os.listdir(baseline_ep_dir))
+            cgvd_frames = sorted(os.listdir(cgvd_ep_dir))
+            num_frames = min(len(baseline_frames), len(cgvd_frames))
+
+            for frame_idx in range(num_frames):
+                b_path = os.path.join(baseline_ep_dir, f"frame_{frame_idx:04d}.png")
+                c_path = os.path.join(cgvd_ep_dir, f"frame_{frame_idx:04d}.png")
+
+                if not os.path.exists(b_path) or not os.path.exists(c_path):
+                    continue
+
+                b_img = cv2.imread(b_path)  # BGR
+                c_img = cv2.imread(c_path)  # BGR
+
+                if b_img is None or c_img is None:
+                    continue
+
+                h, w = b_img.shape[:2]
+
+                # Absolute difference (amplified x3 for visibility)
+                diff = np.abs(b_img.astype(np.float32) - c_img.astype(np.float32))
+                diff_vis = np.clip(diff * 3, 0, 255).astype(np.uint8)
+
+                # Difference heatmap
+                diff_gray = diff.mean(axis=2)
+                diff_heat = cv2.applyColorMap(
+                    np.clip(diff_gray * 3, 0, 255).astype(np.uint8),
+                    cv2.COLORMAP_JET,
+                )
+
+                # 4-column layout: Baseline | CGVD | |Diff|x3 | Heatmap
+                comparison = np.hstack([b_img, c_img, diff_vis, diff_heat])
+
+                # Labels
+                cv2.putText(comparison, "Baseline", (10, 30), font, 0.6, (255, 255, 255), 2)
+                cv2.putText(comparison, "CGVD", (w + 10, 30), font, 0.6, (0, 255, 0), 2)
+                cv2.putText(comparison, "|Diff| x3", (2 * w + 10, 30), font, 0.6, (255, 255, 0), 2)
+                cv2.putText(comparison, "Diff Heatmap", (3 * w + 10, 30), font, 0.6, (255, 255, 255), 2)
+
+                # Max pixel difference annotation
+                max_diff = diff_gray.max()
+                mean_diff = diff_gray.mean()
+                cv2.putText(
+                    comparison,
+                    f"max={max_diff:.1f} mean={mean_diff:.2f}",
+                    (3 * w + 10, 55), font, 0.4, (200, 200, 200), 1,
+                )
+
+                cv2.imwrite(
+                    os.path.join(ep_comparison_dir, f"compare_{frame_idx:04d}.png"),
+                    comparison,
+                )
 
     def _get_task_short(self, task: str) -> str:
         """Extract short task name from full task name."""

@@ -146,7 +146,7 @@ for i in range(safeset_warmup_frames):
 
 **Key properties:**
 - The VLA never sees warmup frames
-- Compositing is skipped during warmup (line 908: `if frame_count <= safeset_warmup_frames: return obs`)
+- Compositing is skipped during warmup (line 891: `if frame_count <= safeset_warmup_frames: return obs`)
 - The environment's `TimeLimit` is extended by `safeset_warmup_frames` steps so the VLA retains its full action budget
 
 ### 4.2 Robot-Free Rendering
@@ -181,11 +181,11 @@ The clean plate is computed once and reused for all subsequent frames. The inpai
 
 ### 5.1 Detection
 
-Each warmup frame, CGVD queries SAM3 for all distractors simultaneously:
+Each warmup frame, CGVD queries SAM3 for all distractors simultaneously. During warmup, the robot-free image (`safe_query_image`) is used for both distractor and safe-set queries so SAM3 sees objects unoccluded by the robot arm:
 
 ```python
 distractor_concepts = ". ".join(distractor_names)  # e.g., "carrot. banana. fork"
-raw_distractor_mask = segmenter.segment(image, distractor_concepts, presence_threshold=0.3)
+raw_distractor_mask = segmenter.segment(safe_query_image, distractor_concepts, presence_threshold=0.3)
 ```
 
 ### 5.2 Accumulation Strategy
@@ -224,7 +224,7 @@ CGVD uses a three-layer sequential filtering strategy to build a robust safe-set
 
 ### 6.1 Layer 1: Cross-Validation (Genuineness Scoring)
 
-**Method:** `_cross_validate_safeset()` (line 315)
+**Method:** `_cross_validate_safeset()` (line 312)
 
 **Problem**: SAM3 may return multiple instances for the target concept (e.g., `spoon_0` = real spoon, `spoon_1` = spatula misclassified as spoon). If the wrong instance is accumulated, a distractor enters the safe-set and becomes permanently visible.
 
@@ -250,7 +250,7 @@ genuineness = safe_score - max_overlapping_distractor_score
 
 ### 6.2 Layer 2: Top-1 Filtering
 
-**Method:** `_filter_overlapping_detections()` (line 266)
+**Method:** `_filter_overlapping_detections()` (line 263)
 
 After cross-validation cleans the multi-instance set, top-1 filtering keeps only the highest-confidence instance per concept:
 
@@ -264,7 +264,7 @@ This reduces the per-concept output to at most one mask, preventing SAM3 multi-i
 
 ### 6.3 Layer 2b: IoU-Gated Target Accumulation
 
-**Method:** `_accumulate_target()` (line 399)
+**Method:** `_accumulate_target()` (line 396)
 
 After filtering, the surviving target mask is accumulated into `cached_target_mask` using `np.maximum` (union). However, to prevent spatially inconsistent detections from contaminating the cache, an IoU gate is applied:
 
@@ -383,11 +383,12 @@ This `current_safe_mask` is used in compositing re-enforcement (Section 9), not 
 Before subtraction, the safe-set mask is dilated to create a protective buffer:
 
 ```python
-safe_dilation_kernel = ones((safe_dilation, safe_dilation))  # default: 5x5
+# _step4_safe_dilation = max(safe_dilation, lama_dilation)  # default: max(5, 11) = 11
+safe_dilation_kernel = ones((_step4_safe_dilation, _step4_safe_dilation))  # default: 11x11
 safe_mask_for_gating = dilate(cached_safe_mask > 0.5, safe_dilation_kernel)
 ```
 
-**Purpose**: SAM3 tends to under-segment object boundaries by 1-3 pixels. Without dilation, the GaussianBlur feathering in compositing would bleed inpainted (table texture) values into the gap between SAM3's boundary and the actual object edge, creating a visible halo. The 5px dilation (~2.5px buffer) prevents this.
+**Purpose**: SAM3 tends to under-segment object boundaries by 1-3 pixels. Without dilation, the GaussianBlur feathering in compositing would bleed inpainted (table texture) values into the gap between SAM3's boundary and the actual object edge, creating a visible halo. The 11px dilation (~5.5px buffer) prevents this. The dilation uses `_step4_safe_dilation = max(safe_dilation, lama_dilation)` to ensure the safe buffer is at least as large as the distractor dilation, preventing distractor dilation from encroaching into safe-set territory.
 
 ### 8.2 Mask Subtraction
 
@@ -411,24 +412,25 @@ Verbally: a pixel is in the final mask if and only if it is (a) detected as a di
 | `cached_robot_mask` | Accumulated robot during warmup | Warmup only |
 | `last_robot_mask` | This frame's robot detection | Every frame |
 | `current_safe_mask` | max(cached_safe_mask, last_robot_mask) — includes robot | Every frame |
-| `cached_mask` | Final compositing mask: distractor AND NOT dilated_safe | Every frame (stable post-warmup) |
+| `cached_mask` | Inpaint-region mask: **dilated** distractor AND NOT dilated_safe | Every frame (stable post-warmup) |
+| `cached_compositing_mask` | Compositing mask: **undilated** distractor AND NOT dilated_safe | Every frame (stable post-warmup) |
 | `safe_mask_for_gating` | Dilated cached_safe_mask (for Step 4 only) | Every frame |
 
 ---
 
 ## 9. Compositing Pipeline
 
-**Method:** `_composite()` (line 990)
+**Method:** `_composite()` (line 958)
 
-The compositing pipeline blends the cached clean plate (inpainted background) with the live camera frame, using the `cached_mask` to determine which pixels show the clean plate vs. the live frame.
+The compositing pipeline blends the cached clean plate (inpainted background) with the live camera frame, using `cached_compositing_mask` to determine which pixels show the clean plate vs. the live frame. Note: compositing uses `cached_compositing_mask` (undilated distractor), not `cached_mask` (dilated distractor used for inpainting). This ensures the GaussianBlur transition starts at the actual distractor boundary rather than `lama_dilation` pixels beyond it.
 
 ### 9.1 Feathered Blending (Step 1)
 
 ```python
-feathered = GaussianBlur(mask, sigma=blend_sigma)  # default: sigma=3.0
+feathered = GaussianBlur(cached_compositing_mask, sigma=blend_sigma)  # default: sigma=3.0
 ```
 
-The binary mask is blurred to create smooth alpha transitions at distractor boundaries. With `sigma=3.0`, the blur has visible effect within ~9 pixels (3 sigma) of each boundary.
+The binary compositing mask is blurred to create smooth alpha transitions at distractor boundaries. With `sigma=3.0`, the blur has visible effect within ~9 pixels (3 sigma) of each boundary.
 
 ### 9.2 Binary Mask Preparation (Step 2)
 
@@ -439,7 +441,7 @@ safe = (current_safe_mask > 0.5).astype(float32)         # target + anchor + rob
 binary_target = (cached_safe_mask > 0.5).astype(float32)  # target + anchor only
 ```
 
-The `binary_target` mask is dilated by `_reinforce_size = safe_dilation + 2 * ceil(blend_sigma)` pixels (default: 5 + 6 = 11):
+The `binary_target` mask is dilated by `_reinforce_size = _step4_safe_dilation + 3 * ceil(blend_sigma)` pixels (default: 11 + 9 = 20):
 
 ```python
 binary_target = dilate(binary_target, kernel=(reinforce_size, reinforce_size))
@@ -502,7 +504,7 @@ The four steps form a defense-in-depth:
 
 ### 10.1 Inpaint Mask Construction
 
-**Method:** `_build_inpaint_mask()` (line 1060)
+**Method:** `_build_inpaint_mask()` (line 1028)
 
 The inpaint mask includes both distractors and the robot:
 
@@ -515,7 +517,7 @@ mask = max(mask, robot)
 
 **Why include robot**: The clean plate should show only the table/background. Including the robot in the inpaint mask means LaMa removes both distractors and the robot, producing a clean background.
 
-**Why dilate robot**: The gap between the undilated robot mask and the dilated-safe hole in `cached_mask` leaves un-inpainted pixels that retain stale robot arm color. Dilating by `_reinforce_size` (default: 11px) covers the GaussianBlur spread.
+**Why dilate robot**: The gap between the undilated robot mask and the dilated-safe hole in `cached_mask` leaves un-inpainted pixels that retain stale robot arm color. Dilating by `_reinforce_size` (default: 20px) covers the GaussianBlur spread.
 
 **Why NOT include target**: Keeping the target visible in the clean plate means that even if compositing feathering is imperfect near a distractor boundary, the target still appears (from the clean plate side). A minor ghost at the target's old position after pickup is far less harmful than the target disappearing during approach.
 
@@ -555,7 +557,7 @@ The inpainter uses a singleton pattern with lazy model loading to avoid redundan
 ```
 1. Extract image from observation
 2. Parse instruction -> (target, anchor)
-3. Segment distractors from live image (threshold=0.3)
+3. Segment distractors from robot-free image (threshold=0.3)
    -> cached_distractor_mask = max(cached, raw)  [union]
 4. Render robot-free image (hide robot meshes, re-render)
 5. Segment target+anchor from robot-free image (threshold=0.15)
@@ -566,9 +568,10 @@ The inpainter uses a singleton pattern with lazy model loading to avoid redundan
    e. If last warmup frame: Layer 3 cleanup (connected components)
 6. Segment robot from live image (threshold=0.05)
    -> cached_robot_mask = max(cached, robot)
-7. Dilate safe mask (5x5 kernel)
-8. Dilate distractor mask (11x11 kernel)
-9. cached_mask = distractor AND NOT dilated_safe
+7. Dilate safe mask (11x11 kernel, using _step4_safe_dilation)
+8. Dilate distractor mask (11x11 kernel, using lama_dilation)
+9. cached_mask = dilated_distractor AND NOT dilated_safe
+   cached_compositing_mask = undilated_distractor AND NOT dilated_safe
 10. If last warmup frame: pre-compute clean plate via LaMa
 11. Skip compositing, return observation unchanged
 ```
@@ -582,11 +585,12 @@ The inpainter uses a singleton pattern with lazy model loading to avoid redundan
 4. Use frozen cached_safe_mask (no recomputation)
 5. Segment robot from live image (fresh every frame, threshold=0.05)
    -> current_safe_mask = max(cached_safe_mask, robot_mask)
-6. Dilate cached_safe_mask for gating (5x5 kernel)
-7. Dilate cached_distractor_mask for inpainting (11x11 kernel)
-8. cached_mask = distractor AND NOT dilated_safe  [stable, since all inputs are frozen except robot, which is excluded]
-9. Composite:
-   a. GaussianBlur(cached_mask, sigma=3.0) -> feathered
+6. Dilate cached_safe_mask for gating (11x11 kernel, using _step4_safe_dilation)
+7. Dilate cached_distractor_mask for inpainting (11x11 kernel, using lama_dilation)
+8. cached_mask = dilated_distractor AND NOT dilated_safe  [stable, since all inputs are frozen except robot, which is excluded]
+   cached_compositing_mask = undilated_distractor AND NOT dilated_safe
+9. Composite (using cached_compositing_mask):
+   a. GaussianBlur(cached_compositing_mask, sigma=3.0) -> feathered
    b. Mechanism 2: Clamp feathered at binary distractor pixels
    c. Re-enforcement: Zero feathered at safe-set pixels (incl. robot)
    d. result = feathered * clean_plate + (1-feathered) * live_image
@@ -629,7 +633,9 @@ The inpainter uses a singleton pattern with lazy model loading to avoid redundan
 | `safe_dilation` | 5 | Safe-set mask dilation for protective buffer (5x5 kernel) |
 | `cache_refresh_interval` | 0 | Frames between clean plate refresh (0 = never refresh) |
 
-**Derived parameter**: `_reinforce_size = safe_dilation + 2 * ceil(blend_sigma)` = 5 + 2*3 = 11 pixels. Used for dilating `binary_target` in compositing re-enforcement and robot mask in inpaint mask construction.
+**Derived parameters**:
+- `_step4_safe_dilation = max(safe_dilation, lama_dilation)` = max(5, 11) = 11 pixels. Used for dilating the safe-set mask in Step 4 gating.
+- `_reinforce_size = _step4_safe_dilation + 3 * ceil(blend_sigma)` = 11 + 3*3 = 20 pixels. Used for dilating `binary_target` in compositing re-enforcement and robot mask in inpaint mask construction.
 
 ### 12.5 Safe-Set Robustness Parameters
 
@@ -683,7 +689,7 @@ Keep the component with the highest score.
 ### Compositing
 
 ```
-feathered = GaussianBlur(cached_mask, sigma=blend_sigma)
+feathered = GaussianBlur(cached_compositing_mask, sigma=blend_sigma)
 
 // Mechanism 2: Clamp at distractor pixels
 non_safe_distractor = binarize(distractor) * (1 - dilated_binary_target)
@@ -701,9 +707,14 @@ result = feathered * clean_plate + (1 - feathered) * live_frame
 
 ```
 cached_mask = binarize(dilated_distractor) AND NOT binarize(dilated_safe)
+cached_compositing_mask = binarize(undilated_distractor) AND NOT binarize(dilated_safe)
 ```
 
 Where:
 - `dilated_distractor = morphological_dilate(cached_distractor_mask, kernel=lama_dilation)`
-- `dilated_safe = morphological_dilate(cached_safe_mask, kernel=safe_dilation)`
+- `undilated_distractor = binarize(cached_distractor_mask)` (before lama_dilation)
+- `dilated_safe = morphological_dilate(cached_safe_mask, kernel=_step4_safe_dilation)`
+- `_step4_safe_dilation = max(safe_dilation, lama_dilation)` (default: 11)
 - `binarize(x) = (x > 0.5)`
+
+`cached_mask` is used for inpaint mask construction; `cached_compositing_mask` is used for compositing.
