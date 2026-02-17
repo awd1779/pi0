@@ -45,7 +45,7 @@ class CGVDWrapper(gym.Wrapper):
         cache_distractor_once: bool = True,
         robot_presence_threshold: float = 0.05,
         distractor_presence_threshold: float = 0.3,
-        safeset_warmup_frames: int = 5,
+        safeset_warmup_frames: int = 1,
         # Compositing parameters
         blend_sigma: float = 3.0,
         lama_dilation: int = 11,
@@ -173,6 +173,7 @@ class CGVDWrapper(gym.Wrapper):
         self.current_safe_mask: Optional[np.ndarray] = None  # Per-frame safe mask (target + anchor + robot)
         self._target_votes: Optional[np.ndarray] = None  # Per-pixel vote count for target
         self._anchor_votes: Optional[np.ndarray] = None  # Per-pixel vote count for anchor
+        self._instance_genuineness: Dict[str, float] = {}  # Per-instance genuineness scores from cross-val
 
         # State - confidence scores and individual masks for debug display
         self.distractor_scores: Dict[str, float] = {}
@@ -196,18 +197,6 @@ class CGVDWrapper(gym.Wrapper):
         self.total_sam3_time: float = 0.0
         self.total_lama_time: float = 0.0
 
-        # Compensate TimeLimit for warmup steps so VLA gets the full step budget.
-        if self.distractor_names and self.safeset_warmup_frames > 0:
-            import gymnasium
-            current = self.env
-            while hasattr(current, 'env'):
-                if isinstance(current, gymnasium.wrappers.TimeLimit):
-                    current._max_episode_steps += self.safeset_warmup_frames
-                    if self.verbose:
-                        print(f"[CGVD] Adjusted TimeLimit: +{self.safeset_warmup_frames} "
-                              f"warmup steps (new max: {current._max_episode_steps})")
-                    break
-                current = current.env
 
     def _log(self, msg: str):
         """Log message to console (if verbose) and to file (if save_debug_images)."""
@@ -315,13 +304,12 @@ class CGVDWrapper(gym.Wrapper):
         safe_scores: Dict[str, float],
         distractor_masks: Dict[str, np.ndarray],
         distractor_scores: Dict[str, float],
-    ) -> Optional[np.ndarray]:
-        """Score-aware cross-validation for safe-set instances.
+    ) -> Dict[str, float]:
+        """Score-aware cross-validation for safe-set instances (compute-only).
 
         For each TARGET instance, compute genuineness = safe_score - max_overlapping_dist_score.
-        Remove instances with negative genuineness (they're distractors detected as target).
-        Always keep the most genuine instance (highest genuineness score).
-        Anchor instances are never filtered.
+        Returns genuineness scores for use in Layer 3 scoring — does NOT remove any instances.
+        Anchor instances are skipped (never scored).
 
         Args:
             safe_masks: Individual safe-set masks {concept_name: mask}
@@ -330,19 +318,18 @@ class CGVDWrapper(gym.Wrapper):
             distractor_scores: Confidence scores for distractor detections
 
         Returns:
-            Combined mask of false-positive safe regions to subtract (H, W) float32,
-            or None if no false positives found.
+            Dict mapping instance name to genuineness score {name: float}.
+            Empty dict if no target instances or no distractors.
         """
         if not safe_masks or not distractor_masks:
-            return None
+            return {}
 
-        # Compute genuineness for each target instance
-        target_genuineness = {}  # {safe_name: (genuineness, safe_mask, max_dist_name, max_dist_score)}
+        genuineness_scores = {}
 
         for safe_name, safe_mask in safe_masks.items():
             base = safe_name.rsplit('_', 1)[0] if '_' in safe_name and safe_name.rsplit('_', 1)[1].isdigit() else safe_name
 
-            # Only filter target instances, skip anchor
+            # Only score target instances, skip anchor
             if base != self.current_target:
                 continue
 
@@ -367,31 +354,12 @@ class CGVDWrapper(gym.Wrapper):
                         max_dist_name = dist_name
 
             genuineness = safe_score - max_dist_score
-            target_genuineness[safe_name] = (genuineness, safe_mask, max_dist_name, max_dist_score)
+            genuineness_scores[safe_name] = genuineness
             self._log(f"[CGVD] Cross-val: '{safe_name}' (score={safe_score:.3f}) "
                       f"genuineness={genuineness:.3f} "
                       f"(best distractor overlap: '{max_dist_name}', score={max_dist_score:.3f})")
 
-        if not target_genuineness:
-            return None
-
-        # Find the most genuine instance — ALWAYS keep this one
-        best_name = max(target_genuineness, key=lambda k: target_genuineness[k][0])
-
-        # Build false-positive mask from non-genuine instances
-        false_positive_mask = None
-        for name, (genuineness, mask, dist_name, dist_score) in target_genuineness.items():
-            if name == best_name:
-                self._log(f"[CGVD] Cross-val: KEEPING '{name}' (genuineness={genuineness:.3f})")
-                continue
-            if genuineness < self.genuineness_margin:  # More "distractor" than "target"
-                self._log(f"[CGVD] Cross-val: removing '{name}' (genuineness={genuineness:.3f})")
-                if false_positive_mask is None:
-                    false_positive_mask = mask.copy()
-                else:
-                    false_positive_mask = np.maximum(false_positive_mask, mask)
-
-        return false_positive_mask
+        return genuineness_scores
 
     def _accumulate_target(self, target_mask: np.ndarray):
         """Accumulate a target detection with IoU spatial gating (Layer 2).
@@ -476,14 +444,32 @@ class CGVDWrapper(gym.Wrapper):
             else:
                 dist_overlap = 0.0
 
-            # Score: consistency * (1 - distractor contamination)
-            # Cap overlap penalty so co-located targets aren't over-penalized
+            # Find best genuineness among instances overlapping this component
+            best_genuineness = 0.0
+            best_genuine_name = None
+            for inst_name, inst_mask in self.safe_individual_masks.items():
+                base = inst_name.rsplit('_', 1)[0] if '_' in inst_name and inst_name.rsplit('_', 1)[1].isdigit() else inst_name
+                if base != self.current_target:
+                    continue
+                # Check if this instance overlaps the component
+                inst_binary = (inst_mask > 0.5)
+                overlap = np.logical_and(component, inst_binary).sum()
+                if overlap > 0:
+                    g = self._instance_genuineness.get(inst_name, 0.0)
+                    if best_genuine_name is None or g > best_genuineness:
+                        best_genuineness = g
+                        best_genuine_name = inst_name
+
+            # Score: consistency * (1 - distractor contamination) * genuineness factor
+            # genuineness modulates the score: positive genuineness boosts, negative penalizes
             overlap_penalty = min(dist_overlap, self.overlap_penalty_cap)
-            score = avg_votes * (1.0 - overlap_penalty)
+            genuineness_factor = 1.0 + best_genuineness  # genuineness_weight=1.0 baked in
+            score = avg_votes * (1.0 - overlap_penalty) * genuineness_factor
 
             self._log(f"[CGVD] Layer 3: component {label_id}: "
                       f"pixels={pixel_count}, avg_votes={avg_votes:.1f}, "
-                      f"dist_overlap={dist_overlap:.2f}, score={score:.3f}")
+                      f"dist_overlap={dist_overlap:.2f}, genuineness={best_genuineness:.3f} "
+                      f"({best_genuine_name}), score={score:.3f}")
 
             if score > best_score:
                 best_score = score
@@ -547,6 +533,7 @@ class CGVDWrapper(gym.Wrapper):
         self.current_safe_mask = None
         self._target_votes = None
         self._anchor_votes = None
+        self._instance_genuineness = {}
         self.distractor_scores = {}
         self.safe_scores = {}
         self.frame_count = 0
@@ -570,14 +557,13 @@ class CGVDWrapper(gym.Wrapper):
             os.makedirs(self.episode_debug_dir, exist_ok=True)
         self.episode_count += 1
 
-        # Internal warmup: step the env with no-op actions while accumulating
-        # SAM3 masks. The VLA never sees these frames — it only receives the
-        # first fully-distilled image after warmup completes.
-        # No-op (np.zeros(7)) = hold position, no rotation, gripper unchanged.
+        # Internal warmup: accumulate SAM3 masks without stepping physics.
+        # The scene is already settled (distractor wrapper handles physics),
+        # so env.step() is unnecessary and can cause the robot's PD controller
+        # to push objects (e.g. spoon near gripper) out of position.
         if self.distractor_names and self.safeset_warmup_frames > 0:
             for i in range(self.safeset_warmup_frames):
                 self._apply_cgvd(obs)  # accumulate masks, skip compositing
-                obs, _, _, _, _ = self.env.step(np.zeros(7))  # no-op step
 
         # First post-warmup frame: inpaint + composite (or just apply if no distractors)
         obs = self._apply_cgvd(obs)
@@ -749,38 +735,19 @@ class CGVDWrapper(gym.Wrapper):
                 self.safe_scores = self.segmenter.last_scores.copy()
                 self.safe_individual_masks = self.segmenter.last_individual_masks.copy()
 
-                # Layer 1: Cross-validate BEFORE top-1 (on full multi-instance set).
-                # With 2+ instances (e.g., spoon_0=real, spoon_1=spatula), cross-val
-                # can remove the false positive before top-1 picks the wrong one.
-                fp_mask = self._cross_validate_safeset(
+                # Cross-validate: compute genuineness scores (no removal).
+                # Scores are stored for Layer 3 connected-component scoring.
+                genuineness_scores = self._cross_validate_safeset(
                     self.safe_individual_masks, self.safe_scores,
                     self.distractor_individual_masks, self.distractor_scores,
                 )
-                if fp_mask is not None:
-                    for name in list(self.safe_individual_masks.keys()):
-                        base = name.rsplit('_', 1)[0] if '_' in name and name.rsplit('_', 1)[1].isdigit() else name
-                        if base == self.current_target:
-                            cleaned = np.clip(self.safe_individual_masks[name] - fp_mask, 0.0, 1.0)
-                            if (cleaned > 0.5).sum() < self.min_component_pixels:
-                                del self.safe_individual_masks[name]
-                                del self.safe_scores[name]
-                                self._log(f"[CGVD] Layer 1: removed instance '{name}' (below {self.min_component_pixels}px after cross-val)")
-                            else:
-                                self.safe_individual_masks[name] = (cleaned > 0.5).astype(np.float32)
-
-                # Top-1 filter: keep only highest-scoring instance per concept
-                # (now operating on the cross-val-cleaned set)
-                filtered_masks, filtered_scores = self._filter_overlapping_detections(
-                    self.safe_individual_masks, self.safe_scores
-                )
-                self.safe_individual_masks = filtered_masks
-                self.safe_scores = filtered_scores
+                self._instance_genuineness.update(genuineness_scores)
 
                 scores_str = ", ".join(f"{k}={v:.3f}" for k, v in self.safe_scores.items())
-                self._log(f"[CGVD] Frame {self.frame_count} Safe-set scores (filtered): {scores_str}")
+                self._log(f"[CGVD] Frame {self.frame_count} Safe-set scores: {scores_str}")
 
-                # Split by concept and accumulate per-concept
-                for name, mask in filtered_masks.items():
+                # Split by concept and accumulate ALL instances per-concept
+                for name, mask in self.safe_individual_masks.items():
                     base = name.rsplit('_', 1)[0] if '_' in name and name.rsplit('_', 1)[1].isdigit() else name
                     if base == self.current_target:
                         self._accumulate_target(mask)
@@ -907,7 +874,8 @@ class CGVDWrapper(gym.Wrapper):
                 self.total_lama_time += self.last_lama_time
                 self._log("[CGVD] Pre-computed clean plate from real image (last warmup frame)")
             if self.save_debug_images:
-                self._save_debug_images(image, self.cached_mask, safe_query_image)
+                self._save_debug_images(image, self.cached_mask, safe_query_image,
+                                        query_image=safe_query_image)
             self.last_cgvd_time = time.time() - cgvd_start
             self.total_cgvd_time += self.last_cgvd_time
             return obs
@@ -1077,192 +1045,174 @@ class CGVDWrapper(gym.Wrapper):
         return result
 
     def _save_debug_images(
-        self, original: np.ndarray, mask: np.ndarray, distilled: np.ndarray
+        self,
+        original: np.ndarray,
+        mask: np.ndarray,
+        distilled: np.ndarray,
+        query_image: Optional[np.ndarray] = None,
     ):
-        """Save debug images showing original, masks, and distilled output.
+        """Save 4-panel debug image: Original | Distractors | Safe-set | VLA Input.
 
-        In distractor mode with safe-set protection, shows 5 columns:
-        - Original | Distractors | Safe Set | Final (D-S) | Distilled
+        Panel 1 (Original): Raw camera frame (with robot).
+        Panel 2 (Distractor Detections): RED overlays on the image SAM3 queried.
+            During warmup this is the robot-free image. Thick contour = accumulated mask.
+        Panel 3 (Safe-set Detections): GREEN overlays on the image SAM3 queried.
+            BLUE overlay for robot mask. Thick contour = accumulated mask.
+        Panel 4 (VLA Input): Final composited image sent to the policy.
 
-        In legacy mode, shows 3 columns:
-        - Original | Foreground | Distilled
+        Args:
+            original: Live camera frame (with robot)
+            mask: Final mask (cached_mask) after Step 4
+            distilled: Composited output (or robot-free image during warmup)
+            query_image: Image that SAM3 actually queried (robot-free during warmup).
+                If None, falls back to original.
         """
         frame_num = self.frame_count - 1  # Already incremented
         h, w = original.shape[:2]
         font = cv2.FONT_HERSHEY_SIMPLEX
+        in_warmup = frame_num < self.safeset_warmup_frames
+        overlay_alpha = 0.4
+
+        # Base image for detection overlay panels: use the image SAM3 actually saw
+        sam3_base = query_image if query_image is not None else original
 
         if self.distractor_names and self.cached_distractor_mask is not None:
-            # 5-column layout for distractor mode with safe-set protection
-            dist_vis = (self.cached_distractor_mask * 255).astype(np.uint8)
-            dist_vis = cv2.cvtColor(dist_vis, cv2.COLOR_GRAY2RGB)
+            # ── Panel 1: Original (live frame with robot) ──
+            panel1 = original.copy()
 
-            safe_vis = (self.cached_safe_mask * 255).astype(np.uint8)
-            safe_vis = cv2.cvtColor(safe_vis, cv2.COLOR_GRAY2RGB)
+            # ── Panel 2: Distractor Detections (overlaid on SAM3 query image) ──
+            panel2 = sam3_base.copy()
 
-            final_vis = (mask * 255).astype(np.uint8)
-            final_vis = cv2.cvtColor(final_vis, cv2.COLOR_GRAY2RGB)
+            for name, ind_mask in self.distractor_individual_masks.items():
+                score = self.distractor_scores.get(name, 0)
+                mask_bin = (ind_mask > 0.5).astype(np.uint8)
+                if mask_bin.sum() < 10:
+                    continue
+                where = mask_bin > 0
+                panel2[where] = (
+                    panel2[where].astype(np.float32) * (1 - overlay_alpha)
+                    + np.array([255, 60, 60], dtype=np.float32) * overlay_alpha
+                ).astype(np.uint8)
+                contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(panel2, contours, -1, (255, 0, 0), 1)
+                ys, xs = np.where(where)
+                cx, cy = int(xs.mean()), int(ys.mean())
+                label = f"{name}:{score:.2f}"
+                (tw, th), _ = cv2.getTextSize(label, font, 0.35, 1)
+                cv2.rectangle(panel2, (cx - 2, cy - th - 3), (cx + tw + 2, cy + 3), (0, 0, 0), -1)
+                cv2.putText(panel2, label, (cx, cy), font, 0.35, (255, 120, 120), 1)
 
-            # Seam heatmap: absolute pixel difference between distilled and original
-            seam_diff = np.abs(distilled.astype(np.float32) - original.astype(np.float32)).mean(axis=2)
-            seam_vis = (np.clip(seam_diff * 3, 0, 255)).astype(np.uint8)
-            seam_vis_rgb = cv2.applyColorMap(seam_vis, cv2.COLORMAP_JET)
-            seam_vis_rgb = cv2.cvtColor(seam_vis_rgb, cv2.COLOR_BGR2RGB)
+            # Accumulated distractor contour (thick)
+            if (self.cached_distractor_mask > 0.5).any():
+                contours, _ = cv2.findContours(
+                    (self.cached_distractor_mask > 0.5).astype(np.uint8),
+                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                )
+                cv2.drawContours(panel2, contours, -1, (255, 0, 0), 2)
 
-            # Draw compositing boundary contours on Distilled column
-            distilled_annotated = distilled.copy()
-            contours, _ = cv2.findContours(
-                (mask > 0.5).astype(np.uint8),
-                cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
-            )
-            cv2.drawContours(distilled_annotated, contours, -1, (255, 0, 0), 1)
+            # ── Panel 3: Safe-set Detections (overlaid on SAM3 query image) ──
+            panel3 = sam3_base.copy()
 
-            comparison = np.hstack([original, dist_vis, safe_vis, final_vis, distilled_annotated, seam_vis_rgb])
+            # Target/anchor individual masks — GREEN overlay
+            for name, ind_mask in self.safe_individual_masks.items():
+                score = self.safe_scores.get(name, 0)
+                mask_bin = (ind_mask > 0.5).astype(np.uint8)
+                if mask_bin.sum() < 10:
+                    continue
+                where = mask_bin > 0
+                panel3[where] = (
+                    panel3[where].astype(np.float32) * (1 - overlay_alpha)
+                    + np.array([60, 255, 60], dtype=np.float32) * overlay_alpha
+                ).astype(np.uint8)
+                contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(panel3, contours, -1, (0, 255, 0), 1)
+                ys, xs = np.where(where)
+                cx, cy = int(xs.mean()), int(ys.mean())
+                label = f"{name}:{score:.2f}"
+                (tw, th), _ = cv2.getTextSize(label, font, 0.35, 1)
+                cv2.rectangle(panel3, (cx - 2, cy - th - 3), (cx + tw + 2, cy + 3), (0, 0, 0), -1)
+                cv2.putText(panel3, label, (cx, cy), font, 0.35, (120, 255, 120), 1)
 
-            # Labels with color coding
-            cv2.putText(comparison, "Original", (10, 30), font, 0.5, (255, 255, 255), 1)
-            cv2.putText(
-                comparison, "Distractors", (w + 10, 30), font, 0.5, (255, 255, 255), 1
-            )
-            cv2.putText(
-                comparison, "Safe Set", (2 * w + 10, 30), font, 0.5, (0, 255, 0), 1
-            )
-            cv2.putText(
-                comparison, "Final (D-S)", (3 * w + 10, 30), font, 0.5, (255, 255, 0), 1
-            )
-            cv2.putText(
-                comparison, "Distilled", (4 * w + 10, 30), font, 0.5, (255, 255, 255), 1
-            )
-            cv2.putText(
-                comparison, "Seam Diff", (5 * w + 10, 30), font, 0.5, (255, 255, 255), 1
-            )
+            # Robot mask — BLUE overlay (separate SAM3 query, shown on safe-set panel)
+            if self.last_robot_mask is not None:
+                robot_bin = (self.last_robot_mask > 0.5).astype(np.uint8)
+                if robot_bin.sum() > 10:
+                    where = robot_bin > 0
+                    panel3[where] = (
+                        panel3[where].astype(np.float32) * 0.7
+                        + np.array([80, 130, 255], dtype=np.float32) * 0.3
+                    ).astype(np.uint8)
+                    contours, _ = cv2.findContours(robot_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    cv2.drawContours(panel3, contours, -1, (80, 130, 255), 1)
 
-            # Warn if target object not detected in safe-set
+            # Accumulated safe-set contour (thick)
+            if self.cached_safe_mask is not None and (self.cached_safe_mask > 0.5).any():
+                contours, _ = cv2.findContours(
+                    (self.cached_safe_mask > 0.5).astype(np.uint8),
+                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                )
+                cv2.drawContours(panel3, contours, -1, (0, 255, 0), 2)
+
+            # ── Panel 4: VLA Input ──
+            panel4 = distilled.copy()
+            # Draw compositing boundary
+            if (mask > 0.5).any():
+                contours, _ = cv2.findContours(
+                    (mask > 0.5).astype(np.uint8),
+                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                )
+                cv2.drawContours(panel4, contours, -1, (255, 0, 0), 1)
+
+            # ── Assemble ──
+            comparison = np.hstack([panel1, panel2, panel3, panel4])
+
+            # Panel titles
+            cv2.putText(comparison, f"Original (frame {frame_num})", (5, 20), font, 0.5, (255, 255, 255), 1)
+            if query_image is not None:
+                cv2.putText(comparison, "Distractor Query (robot-free)", (w + 5, 20), font, 0.45, (255, 120, 120), 1)
+                cv2.putText(comparison, "Safe-set Query (robot-free)", (2 * w + 5, 20), font, 0.45, (120, 255, 120), 1)
+            else:
+                cv2.putText(comparison, "Distractor Query", (w + 5, 20), font, 0.5, (255, 120, 120), 1)
+                cv2.putText(comparison, "Safe-set Query", (2 * w + 5, 20), font, 0.5, (120, 255, 120), 1)
+            if in_warmup:
+                cv2.putText(comparison, "Warmup (not sent to VLA)", (3 * w + 5, 20), font, 0.5, (255, 255, 0), 1)
+            else:
+                cv2.putText(comparison, "VLA Input", (3 * w + 5, 20), font, 0.5, (255, 255, 255), 1)
+
+            # Coverage stats on panel 2
+            d_cov = self.cached_distractor_mask.sum() / self.cached_distractor_mask.size * 100
+            cv2.putText(comparison, f"coverage: {d_cov:.1f}%", (w + 5, 38), font, 0.3, (200, 160, 160), 1)
+
+            # Target/anchor + coverage on panel 3
+            y_info = 38
+            if self.current_target:
+                cv2.putText(comparison, f"target: {self.current_target}", (2 * w + 5, y_info), font, 0.35, (0, 255, 0), 1)
+                y_info += 15
+            if self.current_anchor:
+                cv2.putText(comparison, f"anchor: {self.current_anchor}", (2 * w + 5, y_info), font, 0.35, (0, 200, 0), 1)
+                y_info += 15
+            s_cov = self.cached_safe_mask.sum() / self.cached_safe_mask.size * 100 if self.cached_safe_mask is not None else 0
+            cv2.putText(comparison, f"coverage: {s_cov:.1f}%  BLUE=robot", (2 * w + 5, y_info), font, 0.3, (160, 200, 160), 1)
+
+            # Warning if target not in safe-set
             if self.current_target:
                 target_detected = any(
                     self.current_target in k and v >= self.presence_threshold
                     for k, v in self.safe_scores.items()
                 )
                 if not target_detected:
-                    cv2.putText(
-                        comparison, "WARNING: TARGET NOT IN SAFE SET",
-                        (10, h - 40), font, 0.6, (0, 0, 255), 2,
-                    )
+                    cv2.putText(comparison, "TARGET NOT IN SAFE SET",
+                                (5, h - 30), font, 0.6, (255, 0, 0), 2)
 
-            # Add coverage percentages
-            d_cov = self.cached_distractor_mask.sum() / self.cached_distractor_mask.size * 100
-            s_cov = self.cached_safe_mask.sum() / self.cached_safe_mask.size * 100
-            f_cov = mask.sum() / mask.size * 100
-            cv2.putText(
-                comparison, f"{d_cov:.1f}%", (w + 10, 50), font, 0.4, (200, 200, 200), 1
-            )
-            cv2.putText(
-                comparison, f"{s_cov:.1f}%", (2 * w + 10, 50), font, 0.4, (0, 200, 0), 1
-            )
-            cv2.putText(
-                comparison, f"{f_cov:.1f}%", (3 * w + 10, 50), font, 0.4, (200, 200, 0), 1
-            )
-
-            # Overlay labels on mask regions for Distractors column
-            for concept, score in self.distractor_scores.items():
-                if concept in self.distractor_individual_masks:
-                    mask = self.distractor_individual_masks[concept]
-                    if mask.sum() > 0:
-                        # Find centroid of mask
-                        ys, xs = np.where(mask > 0.5)
-                        cx, cy = int(xs.mean()), int(ys.mean())
-                        # Draw marker and label on Distractors column (offset by w)
-                        color = (0, 255, 0) if score >= 0.3 else (0, 0, 255)
-                        label = f"{concept}: {score:.2f}"
-                        # Draw circle at centroid
-                        cv2.circle(comparison, (w + cx, cy), 5, color, -1)
-                        # Draw text with background for visibility
-                        (tw, th), _ = cv2.getTextSize(label, font, 0.4, 1)
-                        cv2.rectangle(comparison, (w + cx - 2, cy - th - 4), (w + cx + tw + 2, cy + 4), (0, 0, 0), -1)
-                        cv2.putText(comparison, label, (w + cx, cy), font, 0.4, color, 1)
-
-            # Overlay labels on mask regions for Safe Set column
-            for concept, score in self.safe_scores.items():
-                if concept in self.safe_individual_masks:
-                    mask = self.safe_individual_masks[concept]
-                    if mask.sum() > 0:
-                        # Find centroid of mask
-                        ys, xs = np.where(mask > 0.5)
-                        cx, cy = int(xs.mean()), int(ys.mean())
-                        # Draw marker and label on Safe Set column (offset by 2*w)
-                        color = (0, 255, 0) if score >= 0.15 else (0, 0, 255)
-                        label = f"{concept}: {score:.2f}"
-                        # Draw circle at centroid
-                        cv2.circle(comparison, (2 * w + cx, cy), 5, color, -1)
-                        # Draw text with background for visibility
-                        (tw, th), _ = cv2.getTextSize(label, font, 0.4, 1)
-                        cv2.rectangle(comparison, (2 * w + cx - 2, cy - th - 4), (2 * w + cx + tw + 2, cy + 4), (0, 0, 0), -1)
-                        cv2.putText(comparison, label, (2 * w + cx, cy), font, 0.4, color, 1)
-
-            # Add target/anchor info
-            if self.current_target:
-                cv2.putText(
-                    comparison,
-                    f"Target: {self.current_target}",
-                    (2 * w + 10, h - 25),
-                    font,
-                    0.4,
-                    (0, 255, 0),
-                    1,
-                )
-            if self.current_anchor:
-                cv2.putText(
-                    comparison,
-                    f"Anchor: {self.current_anchor}",
-                    (2 * w + 10, h - 10),
-                    font,
-                    0.4,
-                    (0, 200, 0),
-                    1,
-                )
+            # Instruction across bottom of panel 1
+            if self.current_instruction:
+                cv2.putText(comparison, self.current_instruction, (5, h - 8), font, 0.35, (255, 255, 0), 1)
 
         else:
-            # Original 3-column layout for legacy mode
-            mask_vis = (mask * 255).astype(np.uint8)
-            mask_vis = cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2RGB)
-
-            comparison = np.hstack([original, mask_vis, distilled])
-
-            # Add labels
-            cv2.putText(comparison, "Original", (10, 30), font, 0.7, (255, 255, 255), 2)
-            cv2.putText(
-                comparison, "Foreground (white=keep)", (w + 10, 30), font, 0.5, (255, 255, 255), 2
-            )
-            cv2.putText(
-                comparison, "Distilled (VLA input)", (2 * w + 10, 30), font, 0.7, (255, 255, 255), 2
-            )
-
-            # Add confidence scores if available
-            if hasattr(self.segmenter, "last_scores") and self.segmenter.last_scores:
-                y_offset = 55
-                for concept, score in self.segmenter.last_scores.items():
-                    # Color code: green if detected (>threshold), red if not
-                    color = (
-                        (0, 255, 0)
-                        if score >= self.presence_threshold
-                        else (255, 100, 100)
-                    )
-                    score_text = f"{concept}: {score:.2f}"
-                    cv2.putText(
-                        comparison, score_text, (w + 10, y_offset), font, 0.4, color, 1
-                    )
-                    y_offset += 18
-
-        # Add instruction text (common to both modes)
-        if self.current_instruction:
-            cv2.putText(
-                comparison,
-                f"Instruction: {self.current_instruction}",
-                (10, h - 10),
-                font,
-                0.5,
-                (255, 255, 0),
-                1,
-            )
+            # No distractors — simple 2-panel
+            comparison = np.hstack([original, distilled])
+            cv2.putText(comparison, "Original", (5, 20), font, 0.5, (255, 255, 255), 1)
+            cv2.putText(comparison, "VLA Input", (w + 5, 20), font, 0.5, (255, 255, 255), 1)
 
         # Save as BGR for OpenCV
         comparison_bgr = cv2.cvtColor(comparison, cv2.COLOR_RGB2BGR)
