@@ -1281,8 +1281,8 @@ def main():
                        help="Randomly sample distractors from pool each episode")
 
     # CGVD thresholds
-    parser.add_argument("--cgvd_safe_threshold", type=float, default=0.6,
-                       help="Threshold for safe-set (target/anchor) detection (default: 0.6)")
+    parser.add_argument("--cgvd_safe_threshold", type=float, default=0.3,
+                       help="Threshold for safe-set (target/anchor) detection (default: 0.3)")
     parser.add_argument("--cgvd_robot_threshold", type=float, default=0.3,
                        help="Threshold for robot arm detection (default: 0.3)")
     parser.add_argument("--cgvd_distractor_threshold", type=float, default=0.20,

@@ -25,7 +25,7 @@
 #   --cgvd_disable_safeset   Disable safe-set protection
 #   --cgvd_no_robot_mask     Don't mask robot gripper
 #   --cgvd_high_threshold    Use higher masking threshold (0.8)
-#   --cgvd_safe_threshold    Safe-set detection threshold (default: 0.6)
+#   --cgvd_safe_threshold    Safe-set detection threshold (default: 0.3)
 #   --cgvd_dist_threshold    Distractor detection threshold (default: 0.6)
 #
 # This ensures fair comparison by using the same:

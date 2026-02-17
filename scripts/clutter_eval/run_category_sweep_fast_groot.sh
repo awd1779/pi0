@@ -25,7 +25,7 @@
 #   --cgvd_save_debug Save CGVD debug images
 #   --cgvd_verbose   Print verbose CGVD output
 #   --randomize_distractors  Randomly sample distractors per episode
-#   --cgvd_safe_threshold    Safe-set detection threshold (default: 0.6)
+#   --cgvd_safe_threshold    Safe-set detection threshold (default: 0.3)
 #   --cgvd_robot_threshold   Robot detection threshold (default: 0.3)
 #   --cgvd_distractor_threshold  Distractor detection threshold (default: 0.20)
 #
@@ -57,7 +57,7 @@ CGVD_VERBOSE=""
 RANDOMIZE_DISTRACTORS=""
 
 # CGVD thresholds
-CGVD_SAFE_THRESHOLD="0.6"
+CGVD_SAFE_THRESHOLD="0.3"
 CGVD_ROBOT_THRESHOLD="0.3"
 CGVD_DISTRACTOR_THRESHOLD="0.20"
 

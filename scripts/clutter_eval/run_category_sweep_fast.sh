@@ -20,7 +20,7 @@
 #   --cgvd_verbose   Print verbose CGVD output
 #   --randomize_distractors  Randomly sample distractors per episode from pool
 #   --save_attention         Save attention map visualizations for each episode
-#   --cgvd_safe_threshold    Safe-set detection threshold (default: 0.6)
+#   --cgvd_safe_threshold    Safe-set detection threshold (default: 0.3)
 #   --cgvd_robot_threshold   Robot detection threshold (default: 0.3)
 #   --cgvd_distractor_threshold  Distractor detection threshold (default: 0.20)
 #
@@ -46,7 +46,7 @@ RANDOMIZE_DISTRACTORS=""
 SAVE_ATTENTION=""
 
 # CGVD thresholds
-CGVD_SAFE_THRESHOLD="0.4"
+CGVD_SAFE_THRESHOLD="0.3"
 CGVD_ROBOT_THRESHOLD="0.3"
 CGVD_DISTRACTOR_THRESHOLD="0.20"
 

@@ -52,9 +52,6 @@ class CGVDWrapper(gym.Wrapper):
         safe_dilation: int = 5,
         cache_refresh_interval: int = 0,
         # Safe-set robustness parameters
-        genuineness_margin: float = -0.1,
-        iou_gate_threshold: float = 0.15,
-        iou_gate_start_frame: int = 2,
         min_component_pixels: int = 50,
         overlap_penalty_cap: float = 0.7,
         # Legacy (kept so callers don't break)
@@ -115,9 +112,6 @@ class CGVDWrapper(gym.Wrapper):
         self.distractor_presence_threshold = distractor_presence_threshold
         self.safeset_warmup_frames = safeset_warmup_frames
         # Safe-set robustness parameters
-        self.genuineness_margin = genuineness_margin
-        self.iou_gate_threshold = iou_gate_threshold
-        self.iou_gate_start_frame = iou_gate_start_frame
         self.min_component_pixels = min_component_pixels
         self.overlap_penalty_cap = overlap_penalty_cap
         # Compositing parameters
@@ -249,55 +243,6 @@ class CGVDWrapper(gym.Wrapper):
             self._show_robot()
             self.env.unwrapped._scene.update_render()
 
-    def _filter_overlapping_detections(
-        self,
-        masks: Dict[str, np.ndarray],
-        scores: Dict[str, float],
-        overlap_threshold: float = 0.5,
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
-        """Keep only the highest confidence instance per concept.
-
-        When SAM3 detects multiple instances (e.g., 'spoon_0', 'spoon_1'),
-        keep only the one with highest confidence for each base concept.
-        This filters out misidentified objects (e.g., spatula detected as spoon
-        but with lower confidence).
-
-        Args:
-            masks: Dict mapping concept name to mask array (e.g., 'spoon_0', 'spoon_1', 'towel')
-            scores: Dict mapping concept name to confidence score
-            overlap_threshold: Unused (kept for API compatibility)
-
-        Returns:
-            Filtered (masks, scores) dicts with only top-scoring instance per concept
-        """
-        if len(masks) <= 1:
-            return masks, scores
-
-        # Group by base concept name (strip _0, _1, etc.)
-        from collections import defaultdict
-        concept_groups = defaultdict(list)
-        for name, score in scores.items():
-            # Extract base name (e.g., 'spoon_0' -> 'spoon', 'towel' -> 'towel')
-            base_name = name.rsplit('_', 1)[0] if '_' in name and name.rsplit('_', 1)[1].isdigit() else name
-            concept_groups[base_name].append((name, score, masks[name]))
-
-        kept_masks = {}
-        kept_scores = {}
-
-        for base_name, instances in concept_groups.items():
-            # Sort by score descending, keep top one
-            instances.sort(key=lambda x: x[1], reverse=True)
-            top_name, top_score, top_mask = instances[0]
-
-            kept_masks[top_name] = top_mask
-            kept_scores[top_name] = top_score
-
-            # Log filtered instances
-            for name, score, _ in instances[1:]:
-                self._log(f"[CGVD] Filtering '{name}' (score={score:.3f}) - keeping '{top_name}' (score={top_score:.3f})")
-
-        return kept_masks, kept_scores
-
     def _cross_validate_safeset(
         self,
         safe_masks: Dict[str, np.ndarray],
@@ -362,7 +307,7 @@ class CGVDWrapper(gym.Wrapper):
         return genuineness_scores
 
     def _accumulate_target(self, target_mask: np.ndarray):
-        """Accumulate a target detection with IoU spatial gating (Layer 2).
+        """Accumulate a target detection (Layer 2).
 
         Args:
             target_mask: Binary mask for this frame's target detection
@@ -378,31 +323,12 @@ class CGVDWrapper(gym.Wrapper):
             self._log("[CGVD] Layer 2: target anchor initialized")
             return
 
-        # IoU gating: skip on early frames
-        early_frame = self.frame_count < self.iou_gate_start_frame
-
-        if early_frame:
-            # Accumulate unconditionally
-            self.cached_target_mask = np.maximum(self.cached_target_mask, target_mask)
-            if self._target_votes is None:
-                self._target_votes = new_binary.astype(np.float32)
-            else:
-                self._target_votes += new_binary.astype(np.float32)
-            self._log(f"[CGVD] Layer 2: accumulated (ungated, frame={self.frame_count})")
-            return
-
-        # Compute IoU against TARGET-ONLY accumulated mask
-        existing_binary = (self.cached_target_mask > 0.5)
-        intersection = np.logical_and(new_binary, existing_binary).sum()
-        union_area = np.logical_or(new_binary, existing_binary).sum()
-        iou = float(intersection) / max(int(union_area), 1)
-
-        if iou > self.iou_gate_threshold:
-            self.cached_target_mask = np.maximum(self.cached_target_mask, target_mask)
-            self._target_votes += new_binary.astype(np.float32)
-            self._log(f"[CGVD] Layer 2: accumulated (IoU={iou:.3f})")
+        self.cached_target_mask = np.maximum(self.cached_target_mask, target_mask)
+        if self._target_votes is None:
+            self._target_votes = new_binary.astype(np.float32)
         else:
-            self._log(f"[CGVD] Layer 2: REJECTED (IoU={iou:.3f} < {self.iou_gate_threshold})")
+            self._target_votes += new_binary.astype(np.float32)
+        self._log(f"[CGVD] Layer 2: accumulated (frame={self.frame_count})")
 
     def _cleanup_target_mask(self):
         """Post-warmup cleanup: keep only the best target component (Layer 3).
@@ -447,6 +373,7 @@ class CGVDWrapper(gym.Wrapper):
             # Find best genuineness among instances overlapping this component
             best_genuineness = 0.0
             best_genuine_name = None
+            best_safe_score = 0.0
             for inst_name, inst_mask in self.safe_individual_masks.items():
                 base = inst_name.rsplit('_', 1)[0] if '_' in inst_name and inst_name.rsplit('_', 1)[1].isdigit() else inst_name
                 if base != self.current_target:
@@ -459,17 +386,18 @@ class CGVDWrapper(gym.Wrapper):
                     if best_genuine_name is None or g > best_genuineness:
                         best_genuineness = g
                         best_genuine_name = inst_name
+                        best_safe_score = self.safe_scores.get(inst_name, 0.0)
 
-            # Score: consistency * (1 - distractor contamination) * genuineness factor
-            # genuineness modulates the score: positive genuineness boosts, negative penalizes
+            # Score: consistency * (1 - distractor contamination) * genuineness factor * safe_score
+            # safe_score ensures high-confidence detections win over fragments
             overlap_penalty = min(dist_overlap, self.overlap_penalty_cap)
             genuineness_factor = 1.0 + best_genuineness  # genuineness_weight=1.0 baked in
-            score = avg_votes * (1.0 - overlap_penalty) * genuineness_factor
+            score = avg_votes * (1.0 - overlap_penalty) * genuineness_factor * best_safe_score
 
             self._log(f"[CGVD] Layer 3: component {label_id}: "
                       f"pixels={pixel_count}, avg_votes={avg_votes:.1f}, "
                       f"dist_overlap={dist_overlap:.2f}, genuineness={best_genuineness:.3f} "
-                      f"({best_genuine_name}), score={score:.3f}")
+                      f"({best_genuine_name}), safe_score={best_safe_score:.3f}, score={score:.3f}")
 
             if score > best_score:
                 best_score = score

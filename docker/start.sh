@@ -1,5 +1,18 @@
 #!/bin/bash
 
+# --- Pull latest code from GitHub ---
+echo "Updating code from GitHub..."
+cd /app
+git clone --depth 1 https://github.com/awd1779/pi0.git open-pi-zero-tmp 2>/dev/null
+if [ -d open-pi-zero-tmp ]; then
+    rsync -a --exclude='checkpoints' --exclude='logs' open-pi-zero-tmp/ open-pi-zero/
+    rm -rf open-pi-zero-tmp
+    echo "Code updated to latest."
+else
+    echo "WARNING: Could not clone repo, using baked-in code."
+fi
+cd /app/open-pi-zero
+
 # --- Symlinks to /workspace (re-created every boot, volume mount breaks them) ---
 mkdir -p /workspace/checkpoints /workspace/logs
 rm -rf /app/open-pi-zero/checkpoints /app/open-pi-zero/logs
