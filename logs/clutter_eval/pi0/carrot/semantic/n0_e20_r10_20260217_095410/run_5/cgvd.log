@@ -1,0 +1,27 @@
+Task: widowx_carrot_on_plate
+Mode: cgvd
+Seed: 5
+Episodes: 20
+--------------------------------------------------
+Episode 1: FAIL (steps=60, time=25.38s, collisions=0, failure=missed_grasp, cgvd=17.61s)
+Episode 2: SUCCESS (steps=60, time=25.28s, collisions=0, failure=success, cgvd=17.65s)
+Episode 3: SUCCESS (steps=60, time=25.38s, collisions=0, failure=success, cgvd=17.65s)
+Episode 4: SUCCESS (steps=60, time=25.42s, collisions=0, failure=success, cgvd=17.68s)
+Episode 5: FAIL (steps=60, time=25.45s, collisions=0, failure=dropped, cgvd=17.69s)
+Episode 6: FAIL (steps=60, time=25.51s, collisions=0, failure=never_reached, cgvd=17.72s)
+Episode 7: FAIL (steps=60, time=25.54s, collisions=0, failure=dropped, cgvd=17.71s)
+Episode 8: SUCCESS (steps=60, time=25.22s, collisions=0, failure=success, cgvd=17.60s)
+Episode 9: SUCCESS (steps=60, time=25.43s, collisions=0, failure=success, cgvd=17.71s)
+Episode 10: SUCCESS (steps=60, time=25.33s, collisions=0, failure=success, cgvd=17.66s)
+Episode 11: SUCCESS (steps=60, time=25.42s, collisions=0, failure=success, cgvd=17.64s)
+Episode 12: FAIL (steps=60, time=25.27s, collisions=0, failure=never_reached, cgvd=17.64s)
+Episode 13: FAIL (steps=60, time=25.30s, collisions=0, failure=missed_grasp, cgvd=17.65s)
+Episode 14: SUCCESS (steps=60, time=25.22s, collisions=0, failure=success, cgvd=17.60s)
+Episode 15: SUCCESS (steps=60, time=25.28s, collisions=0, failure=success, cgvd=17.57s)
+Episode 16: FAIL (steps=60, time=25.31s, collisions=0, failure=missed_grasp, cgvd=17.64s)
+Episode 17: FAIL (steps=60, time=25.42s, collisions=0, failure=missed_grasp, cgvd=17.67s)
+Episode 18: SUCCESS (steps=60, time=25.42s, collisions=0, failure=success, cgvd=17.69s)
+Episode 19: FAIL (steps=60, time=25.51s, collisions=0, failure=dropped, cgvd=17.66s)
+Episode 20: FAIL (steps=60, time=25.38s, collisions=0, failure=dropped, cgvd=17.67s)
+--------------------------------------------------
+SUCCESS RATE: 50.0%

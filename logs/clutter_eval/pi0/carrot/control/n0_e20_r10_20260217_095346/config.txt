@@ -1,0 +1,10 @@
+MODEL=pi0
+TASK=widowx_carrot_on_plate
+TASK_SHORT=carrot
+CHECKPOINT=/app/open-pi-zero/checkpoints/bridge_beta.pt
+CATEGORY=control
+NUM_DISTRACTORS=0
+RANDOMIZE_DISTRACTORS=True
+NUM_EPISODES=20
+SEED=0
+DISTRACTORS=rc_fork_0:0.07 rc_fork_1:0.07 rc_fork_2:0.07 rc_knife_0:0.07 rc_knife_1:0.07 rc_knife_2:0.07 rc_spoon_0:0.07 rc_spoon_1:0.07 rc_spoon_2:0.07 rc_spatula_0:0.07 rc_spatula_1:0.07 rc_ladle_0:0.07 rc_ladle_1:0.07 rc_scissors_0:0.07 rc_bowl_0:0.07 rc_bowl_1:0.07 rc_mug_0:0.07 rc_mug_1:0.07 rc_plate_0:0.07 rc_plate_1:0.07

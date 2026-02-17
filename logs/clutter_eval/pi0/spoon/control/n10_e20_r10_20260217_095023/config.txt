@@ -1,0 +1,10 @@
+MODEL=pi0
+TASK=widowx_spoon_on_towel
+TASK_SHORT=spoon
+CHECKPOINT=/app/open-pi-zero/checkpoints/bridge_beta.pt
+CATEGORY=control
+NUM_DISTRACTORS=10
+RANDOMIZE_DISTRACTORS=True
+NUM_EPISODES=20
+SEED=0
+DISTRACTORS=rc_apple_7:0.06 rc_banana_20:0.06 rc_orange_1:0.06 rc_lemon_4:0.06 rc_mango_12:0.06 rc_tomato_6:0.06 rc_potato_5:0.06 rc_cucumber_3:0.06 rc_corn_0:0.06 rc_bowl_1:0.06 rc_mug_15:0.06 rc_plate_1:0.06 rc_bread_11:0.06 rc_egg_6:0.06 rc_chocolate_7:0.06 rc_canned_food_3:0.06 rc_sponge_0:0.06 rc_candle_1:0.06 rc_wine_11:0.06 rc_milk_5:0.06

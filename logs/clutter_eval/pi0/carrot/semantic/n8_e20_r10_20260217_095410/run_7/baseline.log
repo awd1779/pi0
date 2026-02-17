@@ -1,0 +1,27 @@
+Task: widowx_carrot_on_plate
+Mode: baseline
+Seed: 7
+Episodes: 20
+--------------------------------------------------
+Episode 1: FAIL (steps=60, time=10.31s, collisions=0, failure=missed_grasp)
+Episode 2: SUCCESS (steps=60, time=9.43s, collisions=0, failure=success)
+Episode 3: SUCCESS (steps=60, time=9.62s, collisions=0, failure=success)
+Episode 4: FAIL (steps=60, time=8.95s, collisions=0, failure=missed_grasp)
+Episode 5: SUCCESS (steps=60, time=8.69s, collisions=0, failure=success)
+Episode 6: SUCCESS (steps=60, time=8.94s, collisions=0, failure=success)
+Episode 7: FAIL (steps=60, time=8.96s, collisions=0, failure=missed_grasp)
+Episode 8: SUCCESS (steps=60, time=9.17s, collisions=0, failure=success)
+Episode 9: FAIL (steps=60, time=8.85s, collisions=5, failure=dropped)
+Episode 10: SUCCESS (steps=60, time=8.72s, collisions=0, failure=success)
+Episode 11: SUCCESS (steps=60, time=8.75s, collisions=0, failure=success)
+Episode 12: FAIL (steps=60, time=8.79s, collisions=10, failure=missed_grasp)
+Episode 13: FAIL (steps=60, time=9.02s, collisions=0, failure=never_reached)
+Episode 14: FAIL (steps=60, time=8.91s, collisions=33, failure=never_reached)
+Episode 15: FAIL (steps=60, time=8.68s, collisions=0, failure=missed_grasp)
+Episode 16: SUCCESS (steps=60, time=8.76s, collisions=0, failure=success)
+Episode 17: FAIL (steps=60, time=8.93s, collisions=10, failure=missed_grasp)
+Episode 18: SUCCESS (steps=60, time=8.98s, collisions=0, failure=success)
+Episode 19: FAIL (steps=60, time=8.73s, collisions=0, failure=missed_grasp)
+Episode 20: FAIL (steps=60, time=9.35s, collisions=95, failure=never_reached)
+--------------------------------------------------
+SUCCESS RATE: 45.0%

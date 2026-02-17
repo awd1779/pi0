@@ -1,0 +1,27 @@
+Task: widowx_spoon_on_towel
+Mode: baseline
+Seed: 4
+Episodes: 20
+--------------------------------------------------
+Episode 1: SUCCESS (steps=60, time=7.91s, collisions=0, failure=success)
+Episode 2: FAIL (steps=60, time=8.04s, collisions=0, failure=missed_grasp)
+Episode 3: SUCCESS (steps=60, time=8.09s, collisions=0, failure=success)
+Episode 4: SUCCESS (steps=60, time=7.96s, collisions=0, failure=success)
+Episode 5: SUCCESS (steps=60, time=7.82s, collisions=0, failure=success)
+Episode 6: SUCCESS (steps=60, time=7.98s, collisions=0, failure=success)
+Episode 7: SUCCESS (steps=60, time=7.63s, collisions=0, failure=success)
+Episode 8: FAIL (steps=60, time=7.83s, collisions=0, failure=missed_grasp)
+Episode 9: SUCCESS (steps=60, time=8.21s, collisions=0, failure=success)
+Episode 10: SUCCESS (steps=60, time=7.86s, collisions=0, failure=success)
+Episode 11: SUCCESS (steps=60, time=8.00s, collisions=0, failure=success)
+Episode 12: SUCCESS (steps=60, time=8.05s, collisions=0, failure=success)
+Episode 13: SUCCESS (steps=60, time=7.85s, collisions=0, failure=success)
+Episode 14: SUCCESS (steps=60, time=7.84s, collisions=0, failure=success)
+Episode 15: SUCCESS (steps=60, time=7.82s, collisions=0, failure=success)
+Episode 16: SUCCESS (steps=60, time=8.19s, collisions=0, failure=success)
+Episode 17: SUCCESS (steps=60, time=8.08s, collisions=0, failure=success)
+Episode 18: SUCCESS (steps=60, time=7.96s, collisions=0, failure=success)
+Episode 19: SUCCESS (steps=60, time=7.79s, collisions=0, failure=success)
+Episode 20: FAIL (steps=60, time=7.70s, collisions=0, failure=never_reached)
+--------------------------------------------------
+SUCCESS RATE: 85.0%

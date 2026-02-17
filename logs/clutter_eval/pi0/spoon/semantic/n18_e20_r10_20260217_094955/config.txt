@@ -1,0 +1,10 @@
+MODEL=pi0
+TASK=widowx_spoon_on_towel
+TASK_SHORT=spoon
+CHECKPOINT=/app/open-pi-zero/checkpoints/bridge_beta.pt
+CATEGORY=semantic
+NUM_DISTRACTORS=18
+RANDOMIZE_DISTRACTORS=True
+NUM_EPISODES=20
+SEED=0
+DISTRACTORS=rc_fork_0:0.1 rc_fork_1:0.1 rc_fork_4:0.1 rc_fork_7:0.1 rc_fork_11:0.1 rc_knife_0:0.1 rc_knife_7:0.1 rc_knife_20:0.1 rc_knife_23:0.1 rc_knife_25:0.1 rc_spatula_1:0.1 rc_spatula_4:0.1 rc_spatula_8:0.1 rc_spatula_11:0.1 rc_spatula_3:0.1 rc_scissors_0:0.1 rc_scissors_6:0.1 rc_scissors_12:0.1 rc_scissors_4:0.1 rc_scissors_8:0.1

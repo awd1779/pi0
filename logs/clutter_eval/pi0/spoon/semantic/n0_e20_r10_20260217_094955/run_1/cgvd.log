@@ -1,0 +1,27 @@
+Task: widowx_spoon_on_towel
+Mode: cgvd
+Seed: 1
+Episodes: 20
+--------------------------------------------------
+Episode 1: FAIL (steps=60, time=25.89s, collisions=0, failure=missed_grasp, cgvd=17.76s)
+Episode 2: SUCCESS (steps=60, time=25.63s, collisions=0, failure=success, cgvd=17.82s)
+Episode 3: SUCCESS (steps=60, time=25.85s, collisions=0, failure=success, cgvd=17.74s)
+Episode 4: SUCCESS (steps=60, time=25.74s, collisions=0, failure=success, cgvd=18.00s)
+Episode 5: SUCCESS (steps=60, time=25.82s, collisions=0, failure=success, cgvd=17.87s)
+Episode 6: SUCCESS (steps=60, time=25.91s, collisions=0, failure=success, cgvd=17.93s)
+Episode 7: SUCCESS (steps=60, time=25.98s, collisions=0, failure=success, cgvd=17.98s)
+Episode 8: SUCCESS (steps=60, time=25.47s, collisions=0, failure=success, cgvd=17.78s)
+Episode 9: SUCCESS (steps=60, time=25.76s, collisions=0, failure=success, cgvd=17.85s)
+Episode 10: SUCCESS (steps=60, time=25.52s, collisions=0, failure=success, cgvd=17.82s)
+Episode 11: FAIL (steps=60, time=25.64s, collisions=0, failure=missed_grasp, cgvd=17.81s)
+Episode 12: SUCCESS (steps=60, time=25.72s, collisions=0, failure=success, cgvd=17.79s)
+Episode 13: SUCCESS (steps=60, time=25.63s, collisions=0, failure=success, cgvd=17.72s)
+Episode 14: SUCCESS (steps=60, time=25.88s, collisions=0, failure=success, cgvd=17.86s)
+Episode 15: SUCCESS (steps=60, time=25.65s, collisions=0, failure=success, cgvd=17.87s)
+Episode 16: SUCCESS (steps=60, time=25.49s, collisions=0, failure=success, cgvd=17.76s)
+Episode 17: FAIL (steps=60, time=25.63s, collisions=0, failure=dropped, cgvd=17.71s)
+Episode 18: SUCCESS (steps=60, time=25.83s, collisions=0, failure=success, cgvd=17.86s)
+Episode 19: SUCCESS (steps=60, time=25.97s, collisions=0, failure=success, cgvd=17.94s)
+Episode 20: SUCCESS (steps=60, time=25.69s, collisions=0, failure=success, cgvd=17.83s)
+--------------------------------------------------
+SUCCESS RATE: 85.0%

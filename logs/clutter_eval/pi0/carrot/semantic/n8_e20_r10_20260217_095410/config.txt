@@ -1,0 +1,10 @@
+MODEL=pi0
+TASK=widowx_carrot_on_plate
+TASK_SHORT=carrot
+CHECKPOINT=/app/open-pi-zero/checkpoints/bridge_beta.pt
+CATEGORY=semantic
+NUM_DISTRACTORS=8
+RANDOMIZE_DISTRACTORS=True
+NUM_EPISODES=20
+SEED=0
+DISTRACTORS=rc_corn_0:0.07 rc_corn_3:0.07 rc_corn_4:0.07 rc_cucumber_0:0.07 rc_cucumber_3:0.07 rc_cucumber_5:0.07 rc_eggplant_0:0.07 rc_eggplant_2:0.07 rc_garlic_0:0.07 rc_onion_0:0.07 rc_onion_1:0.07 rc_bell_pepper_0:0.07 rc_bell_pepper_1:0.07 rc_potato_0:0.07 rc_potato_5:0.07 rc_tomato_0:0.07 rc_tomato_6:0.07 rc_squash_0:0.07 rc_squash_16:0.07 rc_sweet_potato_2:0.07
