@@ -34,9 +34,9 @@ else
     echo "  Set HF_TOKEN in RunPod pod environment variables."
 fi
 
-# --- Start SAM3 server in background ---
+# --- Start SAM3 server in background (uses separate venv with transformers git main) ---
 echo "Starting SAM3 server..."
-python scripts/sam3_server.py &
+/opt/sam3_venv/bin/python scripts/sam3_server.py &
 SAM3_PID=$!
 
 # --- Wait for SAM3 server to be ready (up to 120s for model download on first boot) ---

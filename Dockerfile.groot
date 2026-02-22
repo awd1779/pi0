@@ -54,12 +54,15 @@ WORKDIR /app
 COPY docker/requirements_groot.txt /tmp/requirements_groot.txt
 RUN pip install --no-cache-dir -r /tmp/requirements_groot.txt
 
-# ---------- 2. flash-attn (build from source, needs torch + CUDA toolkit) ----------
-RUN pip install --no-cache-dir ninja packaging wheel setuptools && \
-    pip install --no-cache-dir flash-attn --no-build-isolation
+# ---------- 2. transformers (4.53.0 for GR00T/Eagle compatibility) ----------
+RUN pip install --no-cache-dir transformers==4.53.0
 
-# ---------- 3. transformers from git main (for SAM3) ----------
-RUN pip install --no-cache-dir "git+https://github.com/huggingface/transformers.git@main"
+# ---------- 2b. SAM3 server venv (needs transformers git main, separate from GR00T) ----------
+RUN python3.10 -m venv /opt/sam3_venv && \
+    /opt/sam3_venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/sam3_venv/bin/pip install --no-cache-dir torch==2.7.1 torchvision==0.22.1 && \
+    /opt/sam3_venv/bin/pip install --no-cache-dir "git+https://github.com/huggingface/transformers.git@main" && \
+    /opt/sam3_venv/bin/pip install --no-cache-dir opencv-python pillow numpy requests
 
 # ---------- Copy source trees ----------
 COPY allenzren_SimplerEnv/ /app/allenzren_SimplerEnv/
@@ -68,20 +71,37 @@ COPY . /app/open-pi-zero/
 
 WORKDIR /app/open-pi-zero
 
-# ---------- 4. Isaac-GR00T (--no-deps to prevent transformers downgrade) ----------
+# ---------- 3. Isaac-GR00T (--no-deps to prevent transformers downgrade) ----------
 RUN pip install --no-cache-dir -e /app/Isaac-GR00T --no-deps
 
-# ---------- 5. Isaac-GR00T deps not in requirements_groot.txt ----------
+# ---------- 4. Isaac-GR00T deps not in requirements_groot.txt ----------
 RUN pip install --no-cache-dir \
     albumentations==1.4.18 \
+    av==15.0.0 \
+    click==8.1.8 \
+    datasets \
     diffusers==0.35.1 \
+    dm-tree \
+    lmdb==1.7.5 \
+    msgpack==1.1.0 \
+    msgpack-numpy==0.4.8 \
+    pandas==2.2.3 \
     peft==0.17.1 \
-    torchcodec==0.4.0
+    pyzmq==27.0.1 \
+    termcolor \
+    torchcodec==0.4.0 \
+    tyro
 
-# ---------- 6. Editable installs (SimplerEnv + ManiSkill2 + open-pi-zero) ----------
+# ---------- 5. Editable installs (SimplerEnv + ManiSkill2 + open-pi-zero) ----------
 RUN pip install --no-cache-dir -e /app/allenzren_SimplerEnv && \
     pip install --no-cache-dir -e /app/allenzren_SimplerEnv/ManiSkill2_real2sim && \
     pip install --no-cache-dir -e .
+
+# ---------- 6. Force torch 2.7.1 back + flash-attn (MUST be after editable installs) ----------
+RUN pip install --no-cache-dir torch==2.7.1 torchvision==0.22.1 && \
+    pip install --no-cache-dir --upgrade bitsandbytes && \
+    pip install --no-cache-dir ninja packaging wheel setuptools && \
+    pip install --no-cache-dir flash-attn --no-build-isolation
 
 # ---------- Environment variables ----------
 ENV TRANSFORMERS_CACHE=/workspace/cache/transformers
