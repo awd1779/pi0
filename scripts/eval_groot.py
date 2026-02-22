@@ -264,6 +264,16 @@ def main(args):
 
     # Determine embodiment from task
     embodiment = get_embodiment_from_task(args.task)
+
+    # Auto-select model path based on embodiment if not specified
+    if args.model_path is None:
+        if embodiment == "bridge":
+            args.model_path = "nvidia/GR00T-N1.6-bridge"
+        elif embodiment == "fractal":
+            args.model_path = "nvidia/GR00T-N1.6-fractal"
+        else:
+            raise ValueError(f"Cannot auto-select model for embodiment: {embodiment}")
+
     print(f"[GR00T] Task: {args.task}")
     print(f"[GR00T] Embodiment: {embodiment}")
 
@@ -396,8 +406,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_path",
         type=str,
-        default="nvidia/GR00T-N1.6-3B",
-        help="HuggingFace model path or local path",
+        default=None,
+        help="GR00T model path (default: auto-select based on task)",
     )
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)

@@ -29,7 +29,7 @@ class GR00TBridgeSimplerAdapter(BaseEnvAdapter):
 
     def __init__(
         self,
-        image_size: Tuple[int, int] = (224, 224),
+        image_size: Tuple[int, int] = (256, 256),
         **kwargs,  # Accept but ignore unused params for compatibility
     ):
         super().__init__()
@@ -146,7 +146,7 @@ class GR00TFractalSimplerAdapter(BaseEnvAdapter):
 
     def __init__(
         self,
-        image_size: Tuple[int, int] = (224, 224),
+        image_size: Tuple[int, int] = (256, 320),
         **kwargs,  # Accept but ignore unused params for compatibility
     ):
         super().__init__()
