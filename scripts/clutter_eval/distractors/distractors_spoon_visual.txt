@@ -1,10 +1,32 @@
-# Visual distractors: elongated handheld objects (similar shape)
-ycb_037_scissors:0.6
-ycb_043_phillips_screwdriver:0.6
-ycb_044_flat_screwdriver:0.6
-ycb_040_large_marker:0.6
-rc_scissors_3:0.1
-rc_rolling_pin_0:0.1
-ycb_042_adjustable_wrench:0.6
-ycb_048_hammer:0.6
-ycb_032_knife:0.6
+# Visual distractors: other spoons (same object class as target)
+# Tests whether policy/CGVD can distinguish target spoon from lookalikes
+# Pool size: 25 (24 RoboCasa + 1 YCB)
+
+# YCB spoon (1)
+ycb_031_spoon:0.6
+
+# RoboCasa spoons (24)
+rc_spoon_0:0.15
+rc_spoon_1:0.15
+rc_spoon_2:0.15
+rc_spoon_3:0.15
+rc_spoon_4:0.15
+rc_spoon_5:0.15
+rc_spoon_6:0.15
+rc_spoon_7:0.15
+rc_spoon_8:0.15
+rc_spoon_9:0.15
+rc_spoon_10:0.15
+rc_spoon_11:0.15
+rc_spoon_12:0.15
+rc_spoon_13:0.15
+rc_spoon_14:0.15
+rc_spoon_15:0.15
+rc_spoon_16:0.15
+rc_spoon_17:0.15
+rc_spoon_18:0.15
+rc_spoon_19:0.15
+rc_spoon_20:0.15
+rc_spoon_21:0.15
+rc_spoon_22:0.15
+rc_spoon_23:0.15

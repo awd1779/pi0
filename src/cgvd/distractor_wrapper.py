@@ -319,7 +319,9 @@ class DistractorWrapper:
     BRIDGE_DISTRACTORS = [
         "eggplant", "green_cube_3cm", "yellow_cube_3cm",
         "bridge_carrot_generated_modified", "bridge_spoon_generated_modified",
-        "bridge_spoon_blue",  # Blue color variant of spoon
+        "bridge_spoon_blue", "bridge_spoon_red", "bridge_spoon_orange", "bridge_spoon_yellow",
+        "bridge_spoon_cyan", "bridge_spoon_purple", "bridge_spoon_pink",
+        "bridge_spoon_white", "bridge_spoon_black",
         "bridge_plate_objaverse", "sink",
     ]
 

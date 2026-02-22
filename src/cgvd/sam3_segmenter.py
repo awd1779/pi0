@@ -405,14 +405,16 @@ class SAM3ClientSegmenter:
             if response_file.exists():
                 response_file.unlink()
 
-            # Send request
+            # Send request (atomic write via temp file + rename to avoid race)
             request = {
                 'image_path': image_path,
                 'concepts': concept_list,
                 'threshold': threshold,
             }
-            with open(request_file, 'w') as f:
+            tmp_request = request_file.with_suffix('.json.tmp')
+            with open(tmp_request, 'w') as f:
                 json.dump(request, f)
+            tmp_request.rename(request_file)
 
             # Wait for response
             wait_start = time.time()

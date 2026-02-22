@@ -126,12 +126,16 @@ def main():
                     concept_masks[concept] = concept_mask
                     concept_scores[concept] = best_score
 
-                # Save response with per-concept data
+                # Save response with per-concept data (atomic write via temp + rename)
                 save_dict = {'mask': combined_mask}
                 for concept, cmask in concept_masks.items():
                     save_dict[f'mask_{concept}'] = cmask
                     save_dict[f'score_{concept}'] = np.array(concept_scores[concept])
-                np.savez_compressed(response_file, **save_dict)
+                # Use a tmp name ending in .npz so np.savez_compressed doesn't
+                # append an extra .npz extension (it auto-appends when missing).
+                tmp_response = comm_dir / "response_tmp.npz"
+                np.savez_compressed(tmp_response, **save_dict)
+                tmp_response.rename(response_file)
                 print(f"[SAM3 Server] Done. Mask coverage: {combined_mask.sum() / combined_mask.size * 100:.1f}%")
 
             time.sleep(0.01)  # 10ms polling
@@ -142,8 +146,10 @@ def main():
             break
         except Exception as e:
             print(f"[SAM3 Server] Error: {e}")
-            # Save error response
-            np.savez_compressed(response_file, mask=np.zeros((1, 1), dtype=bool), error=str(e))
+            # Save error response (atomic write)
+            tmp_response = comm_dir / "response_tmp.npz"
+            np.savez_compressed(tmp_response, mask=np.zeros((1, 1), dtype=bool), error=str(e))
+            tmp_response.rename(response_file)
 
 
 if __name__ == "__main__":

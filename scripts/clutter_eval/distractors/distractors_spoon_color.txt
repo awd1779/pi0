@@ -1,0 +1,27 @@
+# Color-variant spoon distractors
+# Pool size: 10 RoboCasa spoons
+# Use with --source_obj to set a bridge_spoon_* as target
+
+# Bridge spoon color variants (use as target via --source_obj, not as distractors)
+# bridge_spoon_generated_modified
+# bridge_spoon_blue
+# bridge_spoon_red
+# bridge_spoon_orange
+# bridge_spoon_yellow
+# bridge_spoon_cyan
+# bridge_spoon_purple
+# bridge_spoon_pink
+# bridge_spoon_white
+# bridge_spoon_black
+
+# RoboCasa spoons (different meshes/styles)
+rc_spoon_0:0.15
+rc_spoon_1:0.15
+rc_spoon_2:0.15
+rc_spoon_3:0.15
+rc_spoon_4:0.15
+rc_spoon_5:0.15
+rc_spoon_6:0.15
+rc_spoon_7:0.15
+rc_spoon_8:0.15
+rc_spoon_9:0.15

@@ -1,85 +1,28 @@
 #!/usr/bin/env python3
-"""Batch evaluation script for GR00T N1.6 on SimplerEnv with full sweep support.
+"""Batch evaluation script for OpenVLA on SimplerEnv with full sweep support.
 
-This is the GR00T equivalent of batch_eval.py. It loads the GR00T model ONCE
-and runs through ALL configurations (categories x distractor_counts x runs),
-providing the same output format for direct comparison with Pi0 results.
+This is the OpenVLA equivalent of batch_eval_groot.py. It loads the OpenVLA model
+ONCE and runs through ALL configurations (categories x distractor_counts x runs),
+providing the same output format for direct comparison with Pi0 and GR00T results.
 
-Must be run in the 'groot' conda environment.
+Must be run in the 'openvla' conda environment.
 
 Usage:
-    # Full sweep (same as pi0 run_category_sweep_fast.sh)
-    conda run -n groot python scripts/clutter_eval/batch_eval_groot.py \
-        --task widowx_carrot_on_plate \
+    # Full sweep
+    conda run -n openvla python scripts/clutter_eval/batch_eval_openvla.py \
+        --task widowx_spoon_on_towel \
         --categories semantic visual control \
         --distractor_counts 0 1 3 5 7 9 \
         --episodes 21 --runs 10
 
     # Dry run
-    conda run -n groot python scripts/clutter_eval/batch_eval_groot.py \
-        --task widowx_carrot_on_plate --dry_run
+    conda run -n openvla python scripts/clutter_eval/batch_eval_openvla.py \
+        --task widowx_spoon_on_towel --dry_run
 """
 
-# ============================================================================
-# CRITICAL: Monkey-patch transformers.image_utils BEFORE any other imports
-# The Eagle processor requires VideoInput which doesn't exist in transformers 4.53.0
-# ============================================================================
 import os
-from typing import List, Union
-
-def _patch_eagle_files():
-    cache_dir = os.path.expanduser(
-        "~/.cache/huggingface/modules/transformers_modules/Eagle-Block2A-2B-v2"
-    )
-    if not os.path.exists(cache_dir):
-        return
-
-    proc_path = os.path.join(cache_dir, "processing_eagle3_vl.py")
-    if os.path.exists(proc_path):
-        with open(proc_path, 'r') as f:
-            content = f.read()
-        if "# VideoInput is not available in transformers" not in content:
-            old_import = "from transformers.image_utils import ImageInput, VideoInput, get_image_size, to_numpy_array"
-            new_import = """from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
-# VideoInput is not available in transformers 4.53.0, define it locally
-from typing import List, Union
-import numpy as np
-import torch
-from PIL import Image
-VideoInput = Union[List[Image.Image], List[np.ndarray], List[torch.Tensor]]"""
-            if old_import in content:
-                content = content.replace(old_import, new_import)
-                with open(proc_path, 'w') as f:
-                    f.write(content)
-                print("[GR00T] Patched processing_eagle3_vl.py to fix VideoInput import")
-
-    fast_path = os.path.join(cache_dir, "image_processing_eagle3_vl_fast.py")
-    if os.path.exists(fast_path):
-        with open(fast_path, 'r') as f:
-            content = f.read()
-        if "This file is disabled" not in content:
-            new_content = '''# This file is disabled because it requires a newer version of transformers.
-raise ImportError(
-    "Eagle3_VLImageProcessorFast requires transformers >= 4.57.0. "
-    "Falling back to slow image processor."
-)
-'''
-            with open(fast_path, 'w') as f:
-                f.write(new_content)
-            print("[GR00T] Disabled fast image processor (requires newer transformers)")
-
-_patch_eagle_files()
-
-try:
-    import numpy as np
-    import torch
-    from PIL import Image
-    import transformers.image_utils as _image_utils
-    if not hasattr(_image_utils, 'VideoInput'):
-        _image_utils.VideoInput = Union[List[Image.Image], List[np.ndarray], List[torch.Tensor]]
-except ImportError:
-    pass
-# ============================================================================
+os.environ.setdefault("VK_ICD_FILENAMES", "/etc/vulkan/icd.d/nvidia_icd.json")
+os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
 
 import argparse
 import gc
@@ -89,17 +32,15 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Generator, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
-import cv2
 import imageio
+import numpy as np
 import simpler_env
+import torch
 
-from src.model.vla.groot import GR00TInference
-from src.agent.env_adapter.groot_simpler import (
-    GR00TBridgeSimplerAdapter,
-    GR00TFractalSimplerAdapter,
-)
+from src.model.vla.openvla import OpenVLAInference
+from src.agent.env_adapter.openvla_simpler import OpenVLABridgeSimplerAdapter
 
 
 # ---------------------------------------------------------------------------
@@ -183,28 +124,30 @@ class ConfigResult:
 # Batch evaluator
 # ---------------------------------------------------------------------------
 
-class GR00TBatchEvaluator:
-    """Evaluator that loads GR00T once and runs multiple configurations."""
+class OpenVLABatchEvaluator:
+    """Evaluator that loads OpenVLA once and runs multiple configurations."""
 
     def __init__(
         self,
         model_path: str,
-        embodiment: str = "bridge",
+        unnorm_key: str = "bridge_orig",
         device: int = 0,
         use_bf16: bool = True,
+        load_in_8bit: bool = False,
         act_steps: int = 1,
         recording: bool = False,
         cgvd_save_debug: bool = False,
         cgvd_verbose: bool = False,
-        cgvd_safe_threshold: float = 0.6,
+        cgvd_safe_threshold: float = 0.3,
         cgvd_robot_threshold: float = 0.3,
         cgvd_distractor_threshold: float = 0.20,
     ):
         self.model_path = model_path
-        self.embodiment = embodiment
+        self.unnorm_key = unnorm_key
         self.device_str = f"cuda:{device}"
-        self.dtype = torch.bfloat16 if use_bf16 else torch.float32
         self.gpu_id = device
+        self.use_bf16 = use_bf16
+        self.load_in_8bit = load_in_8bit
         self.act_steps = act_steps
         self.recording = recording
         self.cgvd_save_debug = cgvd_save_debug
@@ -212,24 +155,22 @@ class GR00TBatchEvaluator:
         self.cgvd_safe_threshold = cgvd_safe_threshold
         self.cgvd_robot_threshold = cgvd_robot_threshold
         self.cgvd_distractor_threshold = cgvd_distractor_threshold
-        self.cgvd_target_override = None
-        self.cgvd_anchor_override = None
-        self.prompt_override = None
 
         if recording:
             os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
         # Load model ONCE
         print("\n" + "=" * 70)
-        print("GR00T BATCH EVALUATOR: Loading model (shared across all configurations)")
+        print("OpenVLA BATCH EVALUATOR: Loading model (shared across all configurations)")
         print("=" * 70)
         model_load_start = time.time()
 
-        self.model = GR00TInference(
+        self.model = OpenVLAInference(
             model_path=model_path,
-            embodiment=embodiment,
+            unnorm_key=unnorm_key,
             device=self.device_str,
-            dtype=self.dtype,
+            use_bf16=use_bf16,
+            load_in_8bit=load_in_8bit,
         )
 
         self.model_load_time = time.time() - model_load_start
@@ -239,26 +180,12 @@ class GR00TBatchEvaluator:
             reserved_gb = torch.cuda.memory_reserved(device) / 1e9
             print(f"[Memory] allocated={allocated_gb:.2f}GB, reserved={reserved_gb:.2f}GB")
 
-        # Create env adapter (shared)
-        if embodiment == "bridge":
-            self.env_adapter = GR00TBridgeSimplerAdapter(image_size=(256, 256))
-        elif embodiment == "fractal":
-            self.env_adapter = GR00TFractalSimplerAdapter(image_size=(256, 320))
-        else:
-            raise ValueError(f"Unknown embodiment: {embodiment}")
+        # Create env adapter (shared, no proprioception needed)
+        self.env_adapter = OpenVLABridgeSimplerAdapter(image_size=(224, 224))
 
     def _create_env(self, config: EvalConfig, use_cgvd: bool = False, output_dir: Optional[str] = None):
         """Create environment for a configuration."""
         env = simpler_env.make(config.task)
-
-        # Override source object model if requested (before any wrapper or reset)
-        if getattr(self, 'source_obj_override', None):
-            env.unwrapped._source_obj_name = self.source_obj_override
-
-        # Overlay variant aggregation mode ("off" | "random" | "sequential")
-        overlay_mode = getattr(self, 'overlay_variant_mode', 'off')
-        if overlay_mode != 'off':
-            env.unwrapped.overlay_variant_mode = overlay_mode
 
         if config.distractors and config.num_distractors > 0:
             from src.cgvd.distractor_wrapper import DistractorWrapper
@@ -274,7 +201,7 @@ class GR00TBatchEvaluator:
                 randomize_per_episode=config.randomize_distractors,
             )
 
-        if use_cgvd:
+        if use_cgvd and config.cgvd_distractor_names:
             from src.cgvd import CGVDWrapper
 
             debug_dir = "cgvd_debug"
@@ -286,7 +213,7 @@ class GR00TBatchEvaluator:
                 update_freq=1,
                 presence_threshold=self.cgvd_safe_threshold,
                 use_mock_segmenter=False,
-                use_server_segmenter=True,  # GR00T env needs SAM3 server
+                use_server_segmenter=True,  # OpenVLA env needs SAM3 server (transformers version conflict)
                 include_robot=True,
                 verbose=self.cgvd_verbose,
                 save_debug_images=self.cgvd_save_debug,
@@ -295,8 +222,6 @@ class GR00TBatchEvaluator:
                 cache_distractor_once=True,
                 robot_presence_threshold=self.cgvd_robot_threshold,
                 distractor_presence_threshold=self.cgvd_distractor_threshold,
-                target_override=self.cgvd_target_override,
-                anchor_override=self.cgvd_anchor_override,
             )
 
         return env
@@ -319,15 +244,9 @@ class GR00TBatchEvaluator:
         self.model.reset()
 
         episode_id = (seed + episode_idx) % 24
-        distractor_seed = seed * 10000 + episode_idx  # unique per (run, episode)
-        env_reset_options = {
-            "obj_init_options": {
-                "episode_id": episode_id,
-                "distractor_seed": distractor_seed,
-            }
-        }
+        env_reset_options = {"obj_init_options": {"episode_id": episode_id}}
         obs, _ = env.reset(options=env_reset_options)
-        instruction = self.prompt_override or env.unwrapped.get_language_instruction()
+        instruction = env.unwrapped.get_language_instruction()
 
         # Initialize collision tracker
         collision_tracker = None
@@ -349,38 +268,25 @@ class GR00TBatchEvaluator:
             video_writer = imageio.get_writer(video_path, fps=10)
 
         cnt_step = 0
-        inference_step = 0
         inference_times = []
         success = False
 
-        # Set up frame saving for baseline/CGVD comparison
-        frames_dir = None
-        if self.cgvd_save_debug and output_dir:
-            frames_dir = os.path.join(output_dir, "frames", f"episode_{episode_idx:03d}")
-            os.makedirs(frames_dir, exist_ok=True)
-
         while True:
-            # Save raw observation frame for baseline vs CGVD comparison
-            if frames_dir is not None:
-                from simpler_env.utils.env.observation_utils import get_image_from_maniskill2_obs_dict
-                raw_image = get_image_from_maniskill2_obs_dict(env, obs)
-                frame_path = os.path.join(frames_dir, f"frame_{inference_step:04d}.png")
-                cv2.imwrite(frame_path, cv2.cvtColor(raw_image, cv2.COLOR_RGB2BGR))
-
-            # GR00T inference: preprocess -> forward -> postprocess (numpy-based)
+            # OpenVLA inference: preprocess -> forward -> postprocess
             inputs = self.env_adapter.preprocess(env, obs, instruction)
 
             start_inference = time.time()
-            actions = self.model.forward(
-                images=inputs["image"],
-                state=inputs["state"],
+            action = self.model.forward(
+                image=inputs["image"],
                 instruction=inputs["instruction"],
             )
             if cnt_step > 0:
                 inference_times.append(time.time() - start_inference)
 
-            env_actions = self.env_adapter.postprocess(actions)
+            # action is [7], wrap to [1, 7] for postprocess
+            env_actions = self.env_adapter.postprocess(action[np.newaxis, :])
 
+            # Execute action(s) — typically act_steps=1 for OpenVLA
             for env_action in env_actions[:self.act_steps]:
                 obs, reward, success, truncated, info = env.step(env_action)
                 cnt_step += 1
@@ -396,9 +302,7 @@ class GR00TBatchEvaluator:
                 if truncated:
                     break
 
-            inference_step += 1
-
-            new_instruction = self.prompt_override or env.unwrapped.get_language_instruction()
+            new_instruction = env.unwrapped.get_language_instruction()
             if new_instruction != instruction:
                 instruction = new_instruction
 
@@ -467,82 +371,6 @@ class GR00TBatchEvaluator:
                 break
         return None
 
-    def _generate_frame_comparisons(self, run_dir: str, num_episodes: int):
-        """Generate side-by-side comparison images of baseline vs CGVD frames."""
-        baseline_frames_root = os.path.join(run_dir, "baseline", "frames")
-        cgvd_frames_root = os.path.join(run_dir, "cgvd", "frames")
-        comparison_dir = os.path.join(run_dir, "frame_comparison")
-
-        if not os.path.exists(baseline_frames_root) or not os.path.exists(cgvd_frames_root):
-            return
-
-        os.makedirs(comparison_dir, exist_ok=True)
-        font = cv2.FONT_HERSHEY_SIMPLEX
-
-        for ep_idx in range(num_episodes):
-            ep_name = f"episode_{ep_idx:03d}"
-            baseline_ep_dir = os.path.join(baseline_frames_root, ep_name)
-            cgvd_ep_dir = os.path.join(cgvd_frames_root, ep_name)
-
-            if not os.path.exists(baseline_ep_dir) or not os.path.exists(cgvd_ep_dir):
-                continue
-
-            ep_comparison_dir = os.path.join(comparison_dir, ep_name)
-            os.makedirs(ep_comparison_dir, exist_ok=True)
-
-            baseline_frames = sorted(os.listdir(baseline_ep_dir))
-            cgvd_frames = sorted(os.listdir(cgvd_ep_dir))
-            num_frames = min(len(baseline_frames), len(cgvd_frames))
-
-            for frame_idx in range(num_frames):
-                b_path = os.path.join(baseline_ep_dir, f"frame_{frame_idx:04d}.png")
-                c_path = os.path.join(cgvd_ep_dir, f"frame_{frame_idx:04d}.png")
-
-                if not os.path.exists(b_path) or not os.path.exists(c_path):
-                    continue
-
-                b_img = cv2.imread(b_path)
-                c_img = cv2.imread(c_path)
-
-                if b_img is None or c_img is None:
-                    continue
-
-                h, w = b_img.shape[:2]
-
-                # Absolute difference (amplified x3 for visibility)
-                diff = np.abs(b_img.astype(np.float32) - c_img.astype(np.float32))
-                diff_vis = np.clip(diff * 3, 0, 255).astype(np.uint8)
-
-                # Difference heatmap
-                diff_gray = diff.mean(axis=2)
-                diff_heat = cv2.applyColorMap(
-                    np.clip(diff_gray * 3, 0, 255).astype(np.uint8),
-                    cv2.COLORMAP_JET,
-                )
-
-                # 4-column layout: Baseline | CGVD | |Diff|x3 | Heatmap
-                comparison = np.hstack([b_img, c_img, diff_vis, diff_heat])
-
-                # Labels
-                cv2.putText(comparison, "Baseline", (10, 30), font, 0.6, (255, 255, 255), 2)
-                cv2.putText(comparison, "CGVD", (w + 10, 30), font, 0.6, (0, 255, 0), 2)
-                cv2.putText(comparison, "|Diff| x3", (2 * w + 10, 30), font, 0.6, (255, 255, 0), 2)
-                cv2.putText(comparison, "Diff Heatmap", (3 * w + 10, 30), font, 0.6, (255, 255, 255), 2)
-
-                # Max pixel difference annotation
-                max_diff = diff_gray.max()
-                mean_diff = diff_gray.mean()
-                cv2.putText(
-                    comparison,
-                    f"max={max_diff:.1f} mean={mean_diff:.2f}",
-                    (3 * w + 10, 55), font, 0.4, (200, 200, 200), 1,
-                )
-
-                cv2.imwrite(
-                    os.path.join(ep_comparison_dir, f"compare_{frame_idx:04d}.png"),
-                    comparison,
-                )
-
     def run_configuration(self, config: EvalConfig, config_output_dir: Optional[str] = None) -> ConfigResult:
         """Run a single configuration (both baseline and CGVD)."""
         random.seed(config.seed)
@@ -584,36 +412,37 @@ class GR00TBatchEvaluator:
             print(f"    {log_line}")
         env.close()
 
-        # Run CGVD
-        cgvd_output = os.path.join(run_dir, "cgvd") if run_dir else None
-        if cgvd_output:
-            os.makedirs(cgvd_output, exist_ok=True)
+        # Run CGVD (only if distractors specified)
+        if config.cgvd_distractor_names:
+            cgvd_output = os.path.join(run_dir, "cgvd") if run_dir else None
+            if cgvd_output:
+                os.makedirs(cgvd_output, exist_ok=True)
 
-        print(f"  [CGVD] Running {config.num_episodes} episodes...")
-        env = self._create_env(config, use_cgvd=True, output_dir=cgvd_output)
-        for ep_idx in range(config.num_episodes):
-            result = self._run_episode(
-                env, ep_idx, config.seed,
-                mode="cgvd",
-                output_dir=cgvd_output,
-                task=config.task,
-                use_cgvd=True,
-            )
-            cgvd_results.append(result)
-            status = "SUCCESS" if result.success else "FAILED"
-            log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode}, cgvd={result.cgvd_time:.2f}s)"
-            cgvd_log_lines.append(log_line)
-            print(f"    {log_line}")
-        env.close()
-
-        # Generate baseline vs CGVD comparison images
-        if self.cgvd_save_debug and run_dir:
-            self._generate_frame_comparisons(run_dir, config.num_episodes)
+            print(f"  [CGVD] Running {config.num_episodes} episodes...")
+            env = self._create_env(config, use_cgvd=True, output_dir=cgvd_output)
+            for ep_idx in range(config.num_episodes):
+                result = self._run_episode(
+                    env, ep_idx, config.seed,
+                    mode="cgvd",
+                    output_dir=cgvd_output,
+                    task=config.task,
+                    use_cgvd=True,
+                )
+                cgvd_results.append(result)
+                status = "SUCCESS" if result.success else "FAILED"
+                log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode}, cgvd={result.cgvd_time:.2f}s)"
+                cgvd_log_lines.append(log_line)
+                print(f"    {log_line}")
+            env.close()
+        else:
+            print(f"  [CGVD] Skipped (no distractors)")
+            cgvd_results = baseline_results
 
         # Save log files
         if run_dir:
             self._save_log_file(baseline_log_lines, baseline_results, run_dir, "baseline", config)
-            self._save_log_file(cgvd_log_lines, cgvd_results, run_dir, "cgvd", config)
+            if config.cgvd_distractor_names:
+                self._save_log_file(cgvd_log_lines, cgvd_results, run_dir, "cgvd", config)
 
         torch.cuda.empty_cache()
         gc.collect()
@@ -658,8 +487,9 @@ class GR00TBatchEvaluator:
         if os.path.exists(config_path):
             return
         with open(config_path, "w", encoding="utf-8") as f:
-            f.write(f"MODEL=gr00t\n")
+            f.write(f"MODEL=openvla\n")
             f.write(f"MODEL_PATH={self.model_path}\n")
+            f.write(f"UNNORM_KEY={self.unnorm_key}\n")
             f.write(f"TASK={config.task}\n")
             f.write(f"TASK_SHORT={self._get_task_short(config.task)}\n")
             f.write(f"CATEGORY={config.category}\n")
@@ -677,7 +507,7 @@ class GR00TBatchEvaluator:
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"Task: {config.task}\n")
             f.write(f"Mode: {mode}\n")
-            f.write(f"Model: gr00t ({self.model_path})\n")
+            f.write(f"Model: openvla ({self.model_path})\n")
             f.write(f"Seed: {config.seed}\n")
             f.write(f"Episodes: {config.num_episodes}\n")
             f.write("-" * 50 + "\n")
@@ -702,13 +532,14 @@ class GR00TBatchEvaluator:
 
         report_path = os.path.join(output_dir, "comparison_report.md")
         with open(report_path, "w", encoding="utf-8") as f:
-            f.write("# Paired Evaluation Report (GR00T)\n\n")
+            f.write("# Paired Evaluation Report (OpenVLA)\n\n")
             f.write(f"**Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             f.write("## Configuration\n\n")
             f.write("| Parameter | Value |\n")
             f.write("|-----------|-------|\n")
-            f.write(f"| Model | GR00T N1.6 |\n")
+            f.write(f"| Model | OpenVLA-7B |\n")
             f.write(f"| Model Path | `{self.model_path}` |\n")
+            f.write(f"| Unnorm Key | `{self.unnorm_key}` |\n")
             f.write(f"| Task | `{config.task}` |\n")
             f.write(f"| Category | {config.category} |\n")
             f.write(f"| Num Distractors | {config.num_distractors} |\n")
@@ -956,11 +787,6 @@ def generate_configs(args) -> List[EvalConfig]:
             else:
                 distractors, cgvd_names = load_distractors_from_file(distractor_file, category, num_dist)
 
-            # Exclude source_obj from distractors (avoid spawning target as distractor)
-            if getattr(args, 'source_obj', None) and args.source_obj in [d.split(":")[0] for d in distractors]:
-                distractors = [d for d in distractors if d.split(":")[0] != args.source_obj]
-                print(f"  Excluded source_obj '{args.source_obj}' from {category} distractors")
-
             for run_idx in range(args.runs):
                 seed = args.start_seed + run_idx
                 configs.append(EvalConfig(
@@ -971,7 +797,7 @@ def generate_configs(args) -> List[EvalConfig]:
                     num_episodes=args.episodes,
                     run_index=run_idx,
                     distractors=distractors,
-                    cgvd_distractor_names=cgvd_names,
+                    cgvd_distractor_names=cgvd_names if num_dist > 0 else [],
                     randomize_distractors=args.randomize_distractors,
                     distractor_pool_size=len(distractors),
                 ))
@@ -1025,7 +851,7 @@ def save_sweep_results(results: List[ConfigResult], output_dir: str, model_path:
     for r in results:
         json_results.append({
             "config": {
-                "model": "gr00t",
+                "model": "openvla",
                 "model_path": model_path,
                 "task": r.config.task,
                 "category": r.config.category,
@@ -1098,7 +924,7 @@ def save_sweep_results(results: List[ConfigResult], output_dir: str, model_path:
 def print_sweep_summary(results: List[ConfigResult]):
     """Print summary of sweep results."""
     print("\n" + "=" * 120)
-    print("GR00T SWEEP SUMMARY")
+    print("OpenVLA SWEEP SUMMARY")
     print("=" * 120)
 
     grouped = defaultdict(list)
@@ -1161,16 +987,20 @@ def print_sweep_summary(results: List[ConfigResult]):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="GR00T batch evaluation for configuration sweeps")
+    parser = argparse.ArgumentParser(description="OpenVLA batch evaluation for configuration sweeps")
 
     # Task configuration
-    parser.add_argument("--task", type=str, default="widowx_carrot_on_plate")
-    parser.add_argument("--model_path", type=str, default=None,
-                       help="GR00T model path (default: auto-select based on task)")
+    parser.add_argument("--task", type=str, default="widowx_spoon_on_towel")
+    parser.add_argument("--model_path", type=str, default="openvla/openvla-7b",
+                       help="OpenVLA model path (HuggingFace or local)")
+    parser.add_argument("--unnorm_key", type=str, default="bridge_orig",
+                       help="Unnormalization key for action decoding (default: bridge_orig)")
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--use_bf16", action="store_true", default=True)
+    parser.add_argument("--load_in_8bit", action="store_true", default=False,
+                       help="Load model in 8-bit quantization (reduces VRAM)")
     parser.add_argument("--act_steps", type=int, default=1,
-                       help="Number of action steps to execute per inference (default: 1, matching NVIDIA benchmark)")
+                       help="Number of action steps to execute per inference (default: 1, no chunking)")
 
     # Sweep configuration
     parser.add_argument("--categories", type=str, nargs="+",
@@ -1200,56 +1030,23 @@ def main():
     parser.add_argument("--cgvd_robot_threshold", type=float, default=0.3)
     parser.add_argument("--cgvd_distractor_threshold", type=float, default=0.20)
 
-    # Prompt / concept overrides
-    parser.add_argument("--prompt", type=str, default=None,
-                       help="Override VLA instruction for both baseline and CGVD")
-    parser.add_argument("--cgvd_target", type=str, default=None,
-                       help="Override SAM3 target concept (e.g. 'spoon with green handle')")
-    parser.add_argument("--cgvd_anchor", type=str, default=None,
-                       help="Override SAM3 anchor concept (e.g. 'towel')")
-
-    # Source object override
-    parser.add_argument("--source_obj", type=str, default=None,
-                       help="Override source object model in sim (e.g. 'bridge_spoon_blue')")
-
-    # Overlay variant aggregation
-    parser.add_argument("--overlay_variants", type=str, default="off",
-                       choices=["off", "random", "sequential"],
-                       help="Overlay variant mode: off (default), random, or sequential")
-
     args = parser.parse_args()
-
-    # Auto-select model path based on task
-    if args.model_path is None:
-        if args.task.startswith("widowx"):
-            args.model_path = "nvidia/GR00T-N1.6-bridge"
-        elif args.task.startswith("google_robot"):
-            args.model_path = "nvidia/GR00T-N1.6-fractal"
-        else:
-            raise ValueError(f"Cannot auto-select model for task: {args.task}. Use --model_path.")
-
-    # Determine embodiment from task
-    if args.task.startswith("widowx"):
-        embodiment = "bridge"
-    elif args.task.startswith("google_robot"):
-        embodiment = "fractal"
-    else:
-        raise ValueError(f"Unknown task type: {args.task}")
 
     # Generate configurations
     configs = generate_configs(args)
 
     print("=" * 70)
-    print("GR00T BATCH EVALUATION CONFIGURATION")
+    print("OpenVLA BATCH EVALUATION CONFIGURATION")
     print("=" * 70)
-    print(f"Model: GR00T N1.6 ({args.model_path})")
+    print(f"Model: OpenVLA-7B ({args.model_path})")
+    print(f"Unnorm key: {args.unnorm_key}")
     print(f"Task: {args.task}")
-    print(f"Embodiment: {embodiment}")
     print(f"Categories: {args.categories}")
     print(f"Distractor counts: {args.distractor_counts}")
     print(f"Episodes per config: {args.episodes}")
     print(f"Runs per config: {args.runs}")
     print(f"Act steps: {args.act_steps}")
+    print(f"8-bit quantization: {args.load_in_8bit}")
     print(f"Total configurations: {len(configs)}")
     print(f"Total episodes: {len(configs) * args.episodes * 2}")
     print("=" * 70)
@@ -1265,14 +1062,15 @@ def main():
     # Determine output directory
     if args.output_dir is None:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        args.output_dir = f"logs/clutter_eval/gr00t/{args.task}/{timestamp}"
+        args.output_dir = f"logs/clutter_eval/openvla/{args.task}/{timestamp}"
 
     # Run batch evaluation
-    evaluator = GR00TBatchEvaluator(
+    evaluator = OpenVLABatchEvaluator(
         model_path=args.model_path,
-        embodiment=embodiment,
+        unnorm_key=args.unnorm_key,
         device=args.gpu_id,
         use_bf16=args.use_bf16,
+        load_in_8bit=args.load_in_8bit,
         act_steps=args.act_steps,
         recording=args.recording,
         cgvd_save_debug=args.cgvd_save_debug,
@@ -1281,12 +1079,6 @@ def main():
         cgvd_robot_threshold=args.cgvd_robot_threshold,
         cgvd_distractor_threshold=args.cgvd_distractor_threshold,
     )
-
-    evaluator.prompt_override = args.prompt
-    evaluator.cgvd_target_override = args.cgvd_target
-    evaluator.cgvd_anchor_override = args.cgvd_anchor
-    evaluator.source_obj_override = args.source_obj
-    evaluator.overlay_variant_mode = args.overlay_variants
 
     results = list(evaluator.run_sweep(configs, args.output_dir))
 

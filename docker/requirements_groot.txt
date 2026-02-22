@@ -1,0 +1,42 @@
+# Core ML - pinned to match RunPod base image
+torch==2.7.1
+torchvision==0.22.1
+numpy==1.26.4
+
+# Vision / Segmentation
+opencv-python>=4.8.0
+simple-lama-inpainting>=0.1.0
+pillow>=12.0.0
+
+# Robotics sim
+sapien==2.2.2
+gymnasium>=1.0
+
+# Model / Config
+einops
+omegaconf
+
+# Data / Eval
+imageio
+imageio[ffmpeg]
+matplotlib
+tqdm
+wandb
+
+# Misc
+h5py
+pyyaml
+requests
+scipy>=1.12.0
+tabulate
+gitpython
+gdown>=5.0
+rtree
+trimesh
+ruckig
+transforms3d
+cloudpickle
+
+# GR00T-specific
+sentencepiece
+deepspeed==0.17.6

@@ -16,7 +16,7 @@ import numpy as np
 from simpler_env.utils.env.observation_utils import get_image_from_maniskill2_obs_dict
 
 from src.agent.env_adapter.base import BaseEnvAdapter
-from src.utils.geometry import euler2axangle, mat2euler, quat2mat
+from src.utils.geometry import mat2euler, quat2mat
 
 
 class GR00TBridgeSimplerAdapter(BaseEnvAdapter):
@@ -67,6 +67,9 @@ class GR00TBridgeSimplerAdapter(BaseEnvAdapter):
             self.image_size,
             interpolation=cv2.INTER_LANCZOS4,
         )
+        assert image.shape[:2] == (self.image_size[1], self.image_size[0]), (
+            f"[GR00T Bridge] Resolution mismatch: {image.shape[:2]} != {(self.image_size[1], self.image_size[0])}"
+        )
 
         # Get raw proprioception (GR00T processor handles normalization)
         raw_proprio = self._get_raw_proprio(obs)
@@ -98,32 +101,31 @@ class GR00TBridgeSimplerAdapter(BaseEnvAdapter):
         """
         Postprocess GR00T actions for SimplerEnv.
 
-        GR00T's decode_action already unnormalizes actions, so we only need to:
-        1. Convert euler angles to axis-angle format
-        2. Convert gripper from [0,1] to [-1,1]
+        GR00T's decode_action already unnormalizes actions. The rotation
+        components (labeled roll/pitch/yaw) are actually axis-angle rotation
+        vectors, NOT euler angles. SimplerEnv's PDEEPoseController interprets
+        action[3:6] as a rotation vector (rotvec) via Rotation.from_rotvec(),
+        so we pass them through directly — matching NVIDIA's WidowXBridgeEnv.
 
         Args:
-            actions: [horizon, 7] already unnormalized by GR00T (xyz + euler + gripper)
-                     where gripper is in [0, 1] (0=close, 1=open)
+            actions: [horizon, 7] already unnormalized by GR00T
+                     (xyz + rotvec[3] + gripper) where gripper is [0, 1]
 
         Returns:
-            env_actions: [horizon, 7] for SimplerEnv (xyz + axis-angle + gripper)
+            env_actions: [horizon, 7] for SimplerEnv (xyz + rotvec + gripper)
         """
-        # Actions are already in physical units from GR00T's decode_action
-        # Just convert euler to axis-angle format for SimplerEnv
         env_actions = np.zeros((len(actions), 7))
         for idx, action in enumerate(actions):
-            roll, pitch, yaw = action[3:6]
-            action_rotation_ax, action_rotation_angle = euler2axangle(roll, pitch, yaw)
-
             # Gripper: GR00T outputs [0, 1] (0=close, 1=open)
             # Convert to SimplerEnv: -1=close, 1=open
             gripper = action[-1]
             action_gripper = 2.0 * (gripper > 0.5) - 1.0
 
+            # action[3:6] is already a rotation vector (axis-angle),
+            # pass directly to SimplerEnv (no euler conversion needed)
             env_actions[idx] = np.concatenate([
                 action[:3],
-                action_rotation_ax * action_rotation_angle,
+                action[3:6],
                 [action_gripper],
             ])
 
@@ -183,6 +185,9 @@ class GR00TFractalSimplerAdapter(BaseEnvAdapter):
             self.image_size,
             interpolation=cv2.INTER_LANCZOS4,
         )
+        assert image.shape[:2] == (self.image_size[1], self.image_size[0]), (
+            f"[GR00T Fractal] Resolution mismatch: {image.shape[:2]} != {(self.image_size[1], self.image_size[0])}"
+        )
 
         # Get raw proprioception (GR00T processor handles normalization)
         raw_proprio = self._get_raw_proprio(obs)
@@ -213,31 +218,30 @@ class GR00TFractalSimplerAdapter(BaseEnvAdapter):
         """
         Postprocess GR00T actions for SimplerEnv.
 
-        GR00T's decode_action already unnormalizes actions, so we only need to:
-        1. Convert euler angles to axis-angle format
-        2. Apply sticky gripper mechanism
+        GR00T's decode_action already unnormalizes actions. The rotation
+        components (labeled roll/pitch/yaw) are actually axis-angle rotation
+        vectors, NOT euler angles. SimplerEnv's controller interprets
+        action[3:6] as a rotation vector (rotvec), so we pass them through
+        directly — matching NVIDIA's GoogleFractalEnv.
 
         Args:
-            actions: [horizon, 7] already unnormalized by GR00T (xyz + euler + gripper)
-                     where gripper is in [0, 1] (0=close, 1=open)
+            actions: [horizon, 7] already unnormalized by GR00T
+                     (xyz + rotvec[3] + gripper) where gripper is [0, 1]
 
         Returns:
-            env_actions: [horizon, 7] for SimplerEnv (xyz + axis-angle + gripper)
+            env_actions: [horizon, 7] for SimplerEnv (xyz + rotvec + gripper)
         """
-        # Actions are already in physical units from GR00T's decode_action
-        # Just convert euler to axis-angle format for SimplerEnv
         env_actions = np.zeros((len(actions), 7))
         for idx, action in enumerate(actions):
-            roll, pitch, yaw = action[3:6]
-            action_rotation_ax, action_rotation_angle = euler2axangle(roll, pitch, yaw)
-
             # Process gripper with sticky mechanism
             gripper = action[-1]
             action_gripper = self._postprocess_gripper(gripper)
 
+            # action[3:6] is already a rotation vector (axis-angle),
+            # pass directly to SimplerEnv (no euler conversion needed)
             env_actions[idx] = np.concatenate([
                 action[:3],
-                action_rotation_ax * action_rotation_angle,
+                action[3:6],
                 [action_gripper],
             ])
 

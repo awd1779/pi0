@@ -16,6 +16,7 @@ class InstructionParser:
     TASK_PATTERNS = [
         # Bridge tasks
         (r"spoon.*towel", ("spoon", "towel")),
+        (r"cucumber.*towel", ("cucumber", "towel")),
         (r"carrot.*plate", ("carrot", "plate")),
         (r"eggplant.*basket", ("eggplant", "wicker basket")),
         (r"stack.*cube", ("cube", "cube")),

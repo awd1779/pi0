@@ -1,0 +1,106 @@
+# ==============================================================================
+# open-pi-zero-groot Docker image for GR00T N1.6 GPU evaluation
+# Base: RunPod PyTorch (compatible with RunPod container runtime)
+# Usage:
+#   docker build -t open-pi-zero-groot -f Dockerfile.groot .
+#   docker run --gpus all -it open-pi-zero-groot
+# ==============================================================================
+
+FROM runpod/pytorch:1.0.3-cu1281-torch271-ubuntu2204
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+
+# ---------- System packages ----------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    git \
+    htop \
+    libegl1 \
+    libxext6 \
+    libx11-6 \
+    libxrender1 \
+    libxrandr2 \
+    libjpeg-dev \
+    libpng-dev \
+    libvulkan1 \
+    mesa-vulkan-drivers \
+    tmux \
+    unzip \
+    vim \
+    wget \
+    xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------- Vulkan / EGL config ----------
+COPY docker/nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.json
+COPY docker/nvidia_layers.json /etc/vulkan/implicit_layer.d/nvidia_layers.json
+RUN mkdir -p /etc/vulkan/icd.d && \
+    cp /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json
+
+# ---------- Python 3.10 venv (base image has 3.10 + 3.12; we need 3.10) ----------
+RUN python3.10 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+ENV VIRTUAL_ENV="/opt/venv"
+RUN pip install --no-cache-dir --upgrade pip
+
+# ---------- Source layout (under /app, safe from RunPod /workspace volume) ----------
+WORKDIR /app
+
+# ---------- 1. Base Python deps ----------
+COPY docker/requirements_groot.txt /tmp/requirements_groot.txt
+RUN pip install --no-cache-dir -r /tmp/requirements_groot.txt
+
+# ---------- 2. flash-attn (build from source, needs torch + CUDA toolkit) ----------
+RUN pip install --no-cache-dir ninja packaging wheel setuptools && \
+    pip install --no-cache-dir flash-attn --no-build-isolation
+
+# ---------- 3. transformers from git main (for SAM3) ----------
+RUN pip install --no-cache-dir "git+https://github.com/huggingface/transformers.git@main"
+
+# ---------- Copy source trees ----------
+COPY allenzren_SimplerEnv/ /app/allenzren_SimplerEnv/
+COPY Isaac-GR00T/ /app/Isaac-GR00T/
+COPY . /app/open-pi-zero/
+
+WORKDIR /app/open-pi-zero
+
+# ---------- 4. Isaac-GR00T (--no-deps to prevent transformers downgrade) ----------
+RUN pip install --no-cache-dir -e /app/Isaac-GR00T --no-deps
+
+# ---------- 5. Isaac-GR00T deps not in requirements_groot.txt ----------
+RUN pip install --no-cache-dir \
+    albumentations==1.4.18 \
+    diffusers==0.35.1 \
+    peft==0.17.1 \
+    torchcodec==0.4.0
+
+# ---------- 6. Editable installs (SimplerEnv + ManiSkill2 + open-pi-zero) ----------
+RUN pip install --no-cache-dir -e /app/allenzren_SimplerEnv && \
+    pip install --no-cache-dir -e /app/allenzren_SimplerEnv/ManiSkill2_real2sim && \
+    pip install --no-cache-dir -e .
+
+# ---------- Environment variables ----------
+ENV TRANSFORMERS_CACHE=/workspace/cache/transformers
+ENV HF_HOME=/workspace/cache/huggingface
+ENV VLA_LOG_DIR=/app/open-pi-zero/logs
+ENV VLA_WANDB_ENTITY=none
+ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
+ENV __GLX_VENDOR_LIBRARY_NAME=nvidia
+
+# ---------- Symlink checkpoints/logs to /workspace for persistence ----------
+RUN rm -rf /app/open-pi-zero/checkpoints /app/open-pi-zero/logs && \
+    mkdir -p /workspace/checkpoints /workspace/logs && \
+    ln -sf /workspace/checkpoints /app/open-pi-zero/checkpoints && \
+    ln -sf /workspace/logs /app/open-pi-zero/logs
+
+# ---------- Startup script ----------
+COPY docker/start_groot.sh /app/start_groot.sh
+RUN chmod +x /app/start_groot.sh
+
+# ---------- Entrypoint ----------
+WORKDIR /app/open-pi-zero
+CMD ["/app/start_groot.sh"]

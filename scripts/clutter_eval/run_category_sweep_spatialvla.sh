@@ -1,81 +1,53 @@
 #!/bin/bash
-# Fast category + distractor count sweep for GR00T N1.6 using batch_eval_groot.py
+# Category + distractor count sweep for SpatialVLA using batch evaluation
 #
-# This is the GR00T equivalent of run_category_sweep_fast.sh.
-# It uses batch_eval_groot.py which loads the GR00T model ONCE for the entire sweep.
-#
-# IMPORTANT: Must be run with the 'groot' conda environment available.
-# If using CGVD, start the SAM3 server first in a separate terminal:
-#   conda activate sam3 && python scripts/sam3_server.py
+# This script uses batch_eval_spatialvla.py which loads the model ONCE for the entire sweep.
+# Must be run in the 'spatialvla' conda environment (or via conda run).
 #
 # Usage:
-#   ./scripts/clutter_eval/run_category_sweep_fast_groot.sh [OPTIONS]
+#   ./run_category_sweep_spatialvla.sh [--task TASK] [--dry-run]
 #
 # Options:
-#   --task, -t       Task to evaluate (default: widowx_carrot_on_plate)
+#   --task, -t       Task to evaluate (default: widowx_spoon_on_towel)
 #   --episodes, -e   Episodes per configuration (default: 21)
 #   --runs, -r       Runs per configuration (default: 10)
 #   --seed           Starting seed (default: 0)
 #   --categories     Comma-separated categories (default: semantic,visual,control)
 #   --counts         Comma-separated distractor counts (default: 0,1,3,5,7,9)
-#   --model_path     GR00T model path (default: auto-select based on task)
-#   --act_steps      Action steps per inference (default: 1)
 #   --dry-run        Print commands without executing
 #   --recording      Save video recordings of each episode
 #   --cgvd_save_debug Save CGVD debug images
 #   --cgvd_verbose   Print verbose CGVD output
-#   --randomize_distractors  Randomly sample distractors per episode
+#   --randomize_distractors  Randomly sample distractors per episode from pool
+#   --model_path     SpatialVLA model path (default: IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge)
+#   --unnorm_key     Unnormalization key (default: bridge_orig/1.0.0)
+#   --act_steps      Action steps per inference (default: 4)
 #   --cgvd_safe_threshold    Safe-set detection threshold (default: 0.3)
 #   --cgvd_robot_threshold   Robot detection threshold (default: 0.3)
 #   --cgvd_distractor_threshold  Distractor detection threshold (default: 0.20)
-#   --prompt                 Override VLA instruction for both baseline and CGVD
-#   --cgvd_target            Override SAM3 target concept
-#   --cgvd_anchor            Override SAM3 anchor concept
-#   --source_obj             Override source object model in sim
-#   --overlay_variants       Overlay variant mode: off (default), random, sequential
-#
-# Examples:
-#   # Full sweep (same conditions as pi0)
-#   ./scripts/clutter_eval/run_category_sweep_fast_groot.sh
-#
-#   # Quick test
-#   ./scripts/clutter_eval/run_category_sweep_fast_groot.sh -e 5 -r 2 --counts 0,3
-#
-#   # Dry run to see configuration
-#   ./scripts/clutter_eval/run_category_sweep_fast_groot.sh --dry-run
 
 set -e
 
-# Defaults (same as run_category_sweep_fast.sh for consistency)
-TASK="widowx_carrot_on_plate"
+# Defaults
+TASK="widowx_spoon_on_towel"
 EPISODES=21
 RUNS=10
 START_SEED=0
 CATEGORIES="semantic,visual,control"
 DISTRACTOR_COUNTS="0,1,3,5,7,9"
-MODEL_PATH=""
-ACT_STEPS=1
 DRY_RUN=""
 RECORDING=""
 CGVD_DEBUG=""
 CGVD_VERBOSE=""
 RANDOMIZE_DISTRACTORS=""
+MODEL_PATH="IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge"
+UNNORM_KEY="bridge_orig/1.0.0"
+ACT_STEPS=4
 
 # CGVD thresholds
 CGVD_SAFE_THRESHOLD="0.3"
 CGVD_ROBOT_THRESHOLD="0.3"
 CGVD_DISTRACTOR_THRESHOLD="0.20"
-
-# Prompt / concept overrides
-PROMPT_OVERRIDE=""
-CGVD_TARGET=""
-CGVD_ANCHOR=""
-
-# Source object override
-SOURCE_OBJ=""
-
-# Overlay variant aggregation
-OVERLAY_VARIANTS="off"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -104,14 +76,6 @@ while [[ $# -gt 0 ]]; do
             DISTRACTOR_COUNTS="$2"
             shift 2
             ;;
-        --model_path)
-            MODEL_PATH="$2"
-            shift 2
-            ;;
-        --act_steps)
-            ACT_STEPS="$2"
-            shift 2
-            ;;
         --dry-run)
             DRY_RUN="--dry_run"
             shift
@@ -132,6 +96,18 @@ while [[ $# -gt 0 ]]; do
             RANDOMIZE_DISTRACTORS="--randomize_distractors"
             shift
             ;;
+        --model_path)
+            MODEL_PATH="$2"
+            shift 2
+            ;;
+        --unnorm_key)
+            UNNORM_KEY="$2"
+            shift 2
+            ;;
+        --act_steps)
+            ACT_STEPS="$2"
+            shift 2
+            ;;
         --cgvd_safe_threshold)
             CGVD_SAFE_THRESHOLD="$2"
             shift 2
@@ -144,26 +120,6 @@ while [[ $# -gt 0 ]]; do
             CGVD_DISTRACTOR_THRESHOLD="$2"
             shift 2
             ;;
-        --prompt)
-            PROMPT_OVERRIDE="$2"
-            shift 2
-            ;;
-        --cgvd_target)
-            CGVD_TARGET="$2"
-            shift 2
-            ;;
-        --cgvd_anchor)
-            CGVD_ANCHOR="$2"
-            shift 2
-            ;;
-        --source_obj)
-            SOURCE_OBJ="$2"
-            shift 2
-            ;;
-        --overlay_variants)
-            OVERLAY_VARIANTS="$2"
-            shift 2
-            ;;
         *)
             echo "Unknown option: $1"
             exit 1
@@ -172,11 +128,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Environment setup
-# Use PROJECT_ROOT to support both local (/home/ubuntu/open-pi-zero) and Docker (/workspace/open-pi-zero)
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${PROJECT_ROOT}/../.cache/transformers}"
-export VLA_LOG_DIR="${VLA_LOG_DIR:-${PROJECT_ROOT}/logs}"
-export VLA_WANDB_ENTITY="${VLA_WANDB_ENTITY:-none}"
 export VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
 
@@ -185,18 +137,6 @@ cd "$PROJECT_ROOT"
 # Convert comma-separated to space-separated for Python args
 CATEGORIES_ARGS=$(echo $CATEGORIES | tr ',' ' ')
 COUNTS_ARGS=$(echo $DISTRACTOR_COUNTS | tr ',' ' ')
-
-# Auto-select model path based on task if not specified
-if [[ -z "$MODEL_PATH" ]]; then
-    if [[ "$TASK" == widowx_* ]]; then
-        MODEL_PATH="nvidia/GR00T-N1.6-bridge"
-    elif [[ "$TASK" == google_robot_* ]]; then
-        MODEL_PATH="nvidia/GR00T-N1.6-fractal"
-    else
-        echo "Unknown task type: $TASK (cannot auto-select model)"
-        exit 1
-    fi
-fi
 
 # Calculate expected workload
 IFS=',' read -ra CAT_ARR <<< "$CATEGORIES"
@@ -207,11 +147,12 @@ TOTAL_CONFIGS=$((NUM_CATS * NUM_COUNTS * RUNS))
 TOTAL_EPISODES=$((TOTAL_CONFIGS * EPISODES * 2))  # x2 for baseline + CGVD
 
 echo "=============================================="
-echo "GR00T FAST CATEGORY + DISTRACTOR SWEEP"
-echo "(Using batch_eval_groot.py - single model load)"
+echo "SpatialVLA CATEGORY + DISTRACTOR SWEEP"
+echo "(Using batch_eval_spatialvla.py - single model load)"
 echo "=============================================="
 echo "Task: $TASK"
 echo "Model: $MODEL_PATH"
+echo "Unnorm key: $UNNORM_KEY"
 echo "Act steps: $ACT_STEPS"
 echo "Categories: $CATEGORIES"
 echo "Distractor counts: $DISTRACTOR_COUNTS"
@@ -228,25 +169,13 @@ fi
 echo "=============================================="
 
 # Output directory
-OUTPUT_DIR="logs/clutter_eval/gr00t"
+OUTPUT_DIR="logs/clutter_eval/spatialvla"
 
-# Build optional model_path argument
-MODEL_PATH_ARG=""
-if [[ -n "$MODEL_PATH" ]]; then
-    MODEL_PATH_ARG="--model_path $MODEL_PATH"
-fi
-
-# Use 'conda run -n groot' locally, plain 'python' in Docker
-if command -v conda &>/dev/null && conda env list 2>/dev/null | grep -q "^groot "; then
-    PYTHON_CMD="conda run --no-capture-output -n groot python"
-else
-    PYTHON_CMD="python"
-fi
-
-# Build command
-CMD="xvfb-run -a -s \"-screen 0 1024x768x24\" $PYTHON_CMD scripts/clutter_eval/batch_eval_groot.py \
+# Build command — use conda run to ensure spatialvla env
+CMD="xvfb-run -a -s \"-screen 0 1024x768x24\" conda run --no-capture-output -n spatialvla python scripts/clutter_eval/batch_eval_spatialvla.py \
     --task $TASK \
-    $MODEL_PATH_ARG \
+    --model_path $MODEL_PATH \
+    --unnorm_key $UNNORM_KEY \
     --act_steps $ACT_STEPS \
     --categories $CATEGORIES_ARGS \
     --distractor_counts $COUNTS_ARGS \
@@ -254,28 +183,10 @@ CMD="xvfb-run -a -s \"-screen 0 1024x768x24\" $PYTHON_CMD scripts/clutter_eval/b
     --runs $RUNS \
     --start_seed $START_SEED \
     --output_dir $OUTPUT_DIR \
-    --use_bf16 \
     --cgvd_safe_threshold $CGVD_SAFE_THRESHOLD \
     --cgvd_robot_threshold $CGVD_ROBOT_THRESHOLD \
     --cgvd_distractor_threshold $CGVD_DISTRACTOR_THRESHOLD \
     $DRY_RUN $RECORDING $CGVD_DEBUG $CGVD_VERBOSE $RANDOMIZE_DISTRACTORS"
-
-# Append optional overrides (only if set)
-if [[ -n "$PROMPT_OVERRIDE" ]]; then
-    CMD="$CMD --prompt \"$PROMPT_OVERRIDE\""
-fi
-if [[ -n "$CGVD_TARGET" ]]; then
-    CMD="$CMD --cgvd_target \"$CGVD_TARGET\""
-fi
-if [[ -n "$CGVD_ANCHOR" ]]; then
-    CMD="$CMD --cgvd_anchor \"$CGVD_ANCHOR\""
-fi
-if [[ -n "$SOURCE_OBJ" ]]; then
-    CMD="$CMD --source_obj \"$SOURCE_OBJ\""
-fi
-if [[ "$OVERLAY_VARIANTS" != "off" ]]; then
-    CMD="$CMD --overlay_variants $OVERLAY_VARIANTS"
-fi
 
 echo ""
 echo "Running: $CMD"
@@ -296,7 +207,7 @@ SECS=$((TOTAL_ELAPSED % 60))
 
 echo ""
 echo "=============================================="
-echo "GR00T SWEEP COMPLETE"
+echo "SWEEP COMPLETE"
 echo "=============================================="
 echo "Total time: ${HOURS}h ${MINS}m ${SECS}s"
 echo "Results in: $OUTPUT_DIR"

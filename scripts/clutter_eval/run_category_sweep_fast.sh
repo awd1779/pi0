@@ -50,6 +50,17 @@ CGVD_SAFE_THRESHOLD="0.3"
 CGVD_ROBOT_THRESHOLD="0.3"
 CGVD_DISTRACTOR_THRESHOLD="0.20"
 
+# Prompt / concept overrides
+PROMPT_OVERRIDE=""
+CGVD_TARGET=""
+CGVD_ANCHOR=""
+
+# Source object override
+SOURCE_OBJ=""
+
+# Overlay variant aggregation
+OVERLAY_VARIANTS="off"
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -111,6 +122,26 @@ while [[ $# -gt 0 ]]; do
             ;;
         --cgvd_distractor_threshold)
             CGVD_DISTRACTOR_THRESHOLD="$2"
+            shift 2
+            ;;
+        --prompt)
+            PROMPT_OVERRIDE="$2"
+            shift 2
+            ;;
+        --cgvd_target)
+            CGVD_TARGET="$2"
+            shift 2
+            ;;
+        --cgvd_anchor)
+            CGVD_ANCHOR="$2"
+            shift 2
+            ;;
+        --source_obj)
+            SOURCE_OBJ="$2"
+            shift 2
+            ;;
+        --overlay_variants)
+            OVERLAY_VARIANTS="$2"
             shift 2
             ;;
         *)
@@ -199,6 +230,23 @@ CMD="xvfb-run -a -s \"-screen 0 1024x768x24\" $PYTHON_CMD scripts/clutter_eval/b
     --cgvd_robot_threshold $CGVD_ROBOT_THRESHOLD \
     --cgvd_distractor_threshold $CGVD_DISTRACTOR_THRESHOLD \
     $DRY_RUN $RECORDING $CGVD_DEBUG $CGVD_VERBOSE $RANDOMIZE_DISTRACTORS $SAVE_ATTENTION"
+
+# Append optional overrides (only if set)
+if [[ -n "$PROMPT_OVERRIDE" ]]; then
+    CMD="$CMD --prompt \"$PROMPT_OVERRIDE\""
+fi
+if [[ -n "$CGVD_TARGET" ]]; then
+    CMD="$CMD --cgvd_target \"$CGVD_TARGET\""
+fi
+if [[ -n "$CGVD_ANCHOR" ]]; then
+    CMD="$CMD --cgvd_anchor \"$CGVD_ANCHOR\""
+fi
+if [[ -n "$SOURCE_OBJ" ]]; then
+    CMD="$CMD --source_obj \"$SOURCE_OBJ\""
+fi
+if [[ "$OVERLAY_VARIANTS" != "off" ]]; then
+    CMD="$CMD --overlay_variants $OVERLAY_VARIANTS"
+fi
 
 echo ""
 echo "Running: $CMD"

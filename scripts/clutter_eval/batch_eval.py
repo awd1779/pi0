@@ -175,6 +175,9 @@ class BatchEvaluator:
         self.cgvd_robot_threshold = cgvd_robot_threshold
         self.cgvd_distractor_threshold = cgvd_distractor_threshold
         self.save_attention = save_attention
+        self.cgvd_target_override = None
+        self.cgvd_anchor_override = None
+        self.prompt_override = None
 
         # Set globals for recording
         global _RECORDING_ENABLED, _CGVD_SAVE_DEBUG, _CGVD_VERBOSE
@@ -229,6 +232,15 @@ class BatchEvaluator:
         """Create environment for a configuration."""
         env = simpler_env.make(config.task)
 
+        # Override source object model if requested (before any wrapper or reset)
+        if getattr(self, 'source_obj_override', None):
+            env.unwrapped._source_obj_name = self.source_obj_override
+
+        # Overlay variant aggregation mode ("off" | "random" | "sequential")
+        overlay_mode = getattr(self, 'overlay_variant_mode', 'off')
+        if overlay_mode != 'off':
+            env.unwrapped.overlay_variant_mode = overlay_mode
+
         # Add distractors if specified AND count > 0
         # (num_distractors=0 means no distractors, skip wrapper entirely)
         if config.distractors and config.num_distractors > 0:
@@ -269,6 +281,8 @@ class BatchEvaluator:
                 cache_distractor_once=True,
                 robot_presence_threshold=self.cgvd_robot_threshold,
                 distractor_presence_threshold=self.cgvd_distractor_threshold,
+                target_override=self.cgvd_target_override,
+                anchor_override=self.cgvd_anchor_override,
             )
 
         return env
@@ -299,7 +313,7 @@ class BatchEvaluator:
             }
         }
         obs, _ = env.reset(options=env_reset_options)
-        instruction = env.unwrapped.get_language_instruction()
+        instruction = self.prompt_override or env.unwrapped.get_language_instruction()
 
         # Initialize collision tracker (only if distractors are present)
         collision_tracker = None
@@ -397,7 +411,7 @@ class BatchEvaluator:
 
             inference_step += 1
 
-            new_instruction = env.unwrapped.get_language_instruction()
+            new_instruction = self.prompt_override or env.unwrapped.get_language_instruction()
             if new_instruction != instruction:
                 instruction = new_instruction
 
@@ -699,6 +713,7 @@ class BatchEvaluator:
         task_map = {
             "widowx_carrot_on_plate": "carrot",
             "widowx_banana_on_plate": "banana",
+            "widowx_cucumber_on_towel": "cucumber_towel",
             "widowx_put_eggplant_in_basket": "eggplant",
             "widowx_spoon_on_towel": "spoon",
             "widowx_stack_cube": "cube",
@@ -706,7 +721,7 @@ class BatchEvaluator:
         if task in task_map:
             return task_map[task]
         # Fallback: extract from task name
-        for keyword in ["spoon", "carrot", "eggplant", "banana", "cube"]:
+        for keyword in ["spoon", "carrot", "eggplant", "banana", "cucumber", "cube"]:
             if keyword in task:
                 return keyword
         return task.replace("widowx_", "").replace("google_robot_", "")
@@ -1049,6 +1064,7 @@ def generate_configs(args) -> List[EvalConfig]:
     task_to_base = {
         "widowx_carrot_on_plate": "carrot",
         "widowx_banana_on_plate": "banana",
+        "widowx_cucumber_on_towel": "cucumber",
         "widowx_put_eggplant_in_basket": "eggplant",
         "widowx_spoon_on_towel": "spoon",
         "widowx_stack_cube": "cube",
@@ -1068,6 +1084,11 @@ def generate_configs(args) -> List[EvalConfig]:
             else:
                 # Load only the first num_dist distractors
                 distractors, cgvd_names = load_distractors_from_file(distractor_file, category, num_dist)
+
+            # Exclude source_obj from distractors (avoid spawning target as distractor)
+            if getattr(args, 'source_obj', None) and args.source_obj in [d.split(":")[0] for d in distractors]:
+                distractors = [d for d in distractors if d.split(":")[0] != args.source_obj]
+                print(f"  Excluded source_obj '{args.source_obj}' from {category} distractors")
 
             for run_idx in range(args.runs):
                 seed = args.start_seed + run_idx
@@ -1288,6 +1309,24 @@ def main():
     parser.add_argument("--cgvd_distractor_threshold", type=float, default=0.20,
                        help="Threshold for distractor detection (default: 0.20)")
 
+    # Prompt / concept overrides
+    parser.add_argument("--prompt", type=str, default=None,
+                       help="Override VLA instruction for both baseline and CGVD "
+                            "(e.g. 'put the spoon with green handle on the towel')")
+    parser.add_argument("--cgvd_target", type=str, default=None,
+                       help="Override SAM3 target concept (e.g. 'spoon with green handle')")
+    parser.add_argument("--cgvd_anchor", type=str, default=None,
+                       help="Override SAM3 anchor concept (e.g. 'towel')")
+
+    # Source object override
+    parser.add_argument("--source_obj", type=str, default=None,
+                       help="Override source object model in sim (e.g. 'bridge_spoon_blue')")
+
+    # Overlay variant aggregation
+    parser.add_argument("--overlay_variants", type=str, default="off",
+                       choices=["off", "random", "sequential"],
+                       help="Overlay variant mode: off (default), random, or sequential")
+
     args = parser.parse_args()
 
     # Generate configurations
@@ -1298,8 +1337,11 @@ def main():
 
     if args.dry_run:
         print("[DRY RUN]")
+        if args.source_obj:
+            print(f"  Source object: {args.source_obj}")
         for i, c in enumerate(configs[:10]):
-            print(f"  {i+1}. {c.category} | {c.num_distractors} dist | seed={c.seed}")
+            dist_list = [d.split(":")[0] for d in (c.distractors or [])]
+            print(f"  {i+1}. {c.category} | {c.num_distractors} dist | seed={c.seed} | pool={dist_list}")
         if len(configs) > 10:
             print(f"  ... +{len(configs) - 10} more")
         return
@@ -1323,6 +1365,11 @@ def main():
         cgvd_distractor_threshold=args.cgvd_distractor_threshold,
         save_attention=args.save_attention,
     )
+    evaluator.prompt_override = args.prompt
+    evaluator.cgvd_target_override = args.cgvd_target
+    evaluator.cgvd_anchor_override = args.cgvd_anchor
+    evaluator.source_obj_override = args.source_obj
+    evaluator.overlay_variant_mode = args.overlay_variants
 
     results = list(evaluator.run_sweep(configs, args.output_dir))
 

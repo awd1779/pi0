@@ -168,9 +168,9 @@ def get_embodiment_from_task(task: str) -> str:
 def create_env_adapter(embodiment: str, args):
     """Create the appropriate environment adapter."""
     if embodiment == "bridge":
-        return GR00TBridgeSimplerAdapter(image_size=(224, 224))
+        return GR00TBridgeSimplerAdapter(image_size=(256, 256))
     elif embodiment == "fractal":
-        return GR00TFractalSimplerAdapter(image_size=(224, 224))
+        return GR00TFractalSimplerAdapter(image_size=(256, 320))
     else:
         raise ValueError(f"Unknown embodiment: {embodiment}")
 
@@ -402,7 +402,7 @@ if __name__ == "__main__":
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_episodes", type=int, default=1)
-    parser.add_argument("--act_steps", type=int, default=4, help="Number of action steps to execute per inference")
+    parser.add_argument("--act_steps", type=int, default=1, help="Number of action steps to execute per inference (default: 1, matching NVIDIA benchmark)")
     parser.add_argument("--use_bf16", action="store_true")
     parser.add_argument(
         "--clear_cuda_cache",

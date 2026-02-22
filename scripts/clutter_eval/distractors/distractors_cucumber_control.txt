@@ -1,0 +1,36 @@
+# Control distractors for cucumber task (widowx_cucumber_on_towel)
+# Pool size: 20 (RoboCasa + YCB, no vegetables/fruits)
+# Category: random - no semantic similarity to target
+# Scale: 0.1
+
+# === ACTIVE POOL (20 distractors) ===
+
+# Utensils (5)
+rc_fork_0:0.1
+rc_knife_3:0.1
+rc_spoon_5:0.1
+rc_spatula_2:0.1
+rc_ladle_1:0.1
+
+# Containers (4)
+rc_bowl_3:0.07
+rc_mug_2:0.07
+rc_plate_2:0.07
+rc_cup_2:0.07
+
+# Packaged foods / drinks (4)
+rc_canned_food_3:0.07
+rc_milk_5:0.07
+rc_cereal_13:0.07
+rc_bottled_water_16:0.07
+
+# Food items (4)
+rc_bread_11:0.07
+rc_egg_6:0.07
+rc_croissant_2:0.07
+rc_cheese_1:0.07
+
+# Household (3)
+rc_sponge_0:0.07
+rc_candle_1:0.07
+rc_soap_dispenser_4:0.07

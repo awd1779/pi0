@@ -1,0 +1,33 @@
+# Semantic distractors for cube stacking task (widowx_stack_cube)
+# Objects semantically related to cubes/blocks
+# Pool size: 20
+
+# Built-in cubes (same object class as target)
+green_cube_3cm
+yellow_cube_3cm
+
+# YCB blocks and cube-like objects (6)
+ycb_036_wood_block
+ycb_061_foam_brick
+ycb_062_dice
+ycb_070-a_colored_wood_blocks
+ycb_070-b_colored_wood_blocks
+ycb_077_rubiks_cube
+
+# YCB box-shaped objects (4)
+ycb_003_cracker_box:0.3
+ycb_004_sugar_box:0.3
+ycb_008_pudding_box:0.3
+ycb_009_gelatin_box:0.3
+
+# YCB Lego/building blocks (5)
+ycb_073-a_lego_duplo
+ycb_073-b_lego_duplo
+ycb_073-c_lego_duplo
+ycb_073-d_lego_duplo
+ycb_073-e_lego_duplo
+
+# RoboCasa box-shaped items (3)
+rc_boxed_food_2:0.06
+rc_chocolate_7:0.06
+rc_bar_2:0.06

@@ -61,6 +61,9 @@ class CGVDWrapper(gym.Wrapper):
         disable_inpaint: bool = False,
         # Legacy parameters (ignored, kept for backwards compatibility)
         use_inpaint: bool = True,
+        # SAM3 concept prompt overrides
+        target_override: Optional[str] = None,
+        anchor_override: Optional[str] = None,
         **kwargs,
     ):
         """Initialize CGVD wrapper.
@@ -125,6 +128,10 @@ class CGVDWrapper(gym.Wrapper):
         # Ablation flags
         self.disable_safeset = disable_safeset
         self.disable_inpaint = disable_inpaint
+
+        # SAM3 concept prompt overrides
+        self.target_override = target_override
+        self.anchor_override = anchor_override
 
         # Initialize LaMa inpainter using singleton (unless disabled for ablation)
         # Using singleton avoids redundant model loading when multiple CGVDWrapper
@@ -581,10 +588,16 @@ class CGVDWrapper(gym.Wrapper):
         if instruction != self.current_instruction:
             self.current_instruction = instruction
             self.current_target, self.current_anchor = self.parser.parse(instruction)
+            # Apply overrides if set
+            if self.target_override:
+                self.current_target = self.target_override
+            if self.anchor_override:
+                self.current_anchor = self.anchor_override
             if self.verbose:
                 print(
                     f"[CGVD] Instruction: '{instruction}' -> "
                     f"target='{self.current_target}', anchor='{self.current_anchor}'"
+                    + (" (overridden)" if self.target_override or self.anchor_override else "")
                 )
 
         # Step 2: Distractor mask - accumulate during warm-up period
