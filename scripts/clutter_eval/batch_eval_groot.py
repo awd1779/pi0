@@ -413,6 +413,21 @@ class GR00TBatchEvaluator:
                 new_video_path = video_path.replace(".mp4", f"_{result_suffix}.mp4")
                 os.rename(video_path, new_video_path)
 
+        # Rename frames dir with result suffix
+        if frames_dir is not None and os.path.exists(frames_dir):
+            result_suffix = "SUCCESS" if success else "FAILED"
+            new_frames_dir = f"{frames_dir}_{result_suffix}"
+            os.rename(frames_dir, new_frames_dir)
+
+        # Rename CGVD debug episode dir with result suffix
+        if use_cgvd:
+            cgvd_wrapper = self._get_cgvd_wrapper(env)
+            if cgvd_wrapper is not None and cgvd_wrapper.episode_debug_dir is not None:
+                ep_debug = cgvd_wrapper.episode_debug_dir
+                if os.path.exists(ep_debug):
+                    result_suffix = "SUCCESS" if success else "FAILED"
+                    os.rename(ep_debug, f"{ep_debug}_{result_suffix}")
+
         episode_time = time.time() - episode_start
         avg_inference = np.mean(inference_times) if inference_times else 0
 

@@ -208,11 +208,17 @@ class CGVDWrapper(gym.Wrapper):
             self.log_file.flush()
 
     def _hide_robot(self):
-        """Hide robot visual meshes so SAM3 sees unoccluded scene."""
+        """Hide robot visual meshes so SAM3 sees unoccluded scene.
+
+        Uses RenderBody.set_visible(False) instead of link.hide_visual() to
+        preserve segmentation actor IDs. This ensures SimplerEnv's overlay
+        system composites the real-world photo correctly.
+        """
         try:
             robot = self.env.unwrapped.agent.robot
             for link in robot.get_links():
-                link.hide_visual()
+                for visual_body in link.get_visual_bodies():
+                    visual_body.set_visible(False)
         except Exception as e:
             self._log(f"[CGVD] Warning: could not hide robot: {e}")
 
@@ -221,15 +227,18 @@ class CGVDWrapper(gym.Wrapper):
         try:
             robot = self.env.unwrapped.agent.robot
             for link in robot.get_links():
-                link.unhide_visual()
+                for visual_body in link.get_visual_bodies():
+                    visual_body.set_visible(True)
         except Exception as e:
             self._log(f"[CGVD] Warning: could not show robot: {e}")
 
     def _render_robot_free_image(self, camera_name: str) -> np.ndarray:
         """Re-render scene with robot hidden to get unoccluded view for SAM3.
 
-        Used during warmup so SAM3 sees the real target unoccluded by the
-        robot arm, preventing the spatula (fully visible) from winning top-1.
+        Uses get_obs() on the unwrapped env so the real-world photo overlay
+        (greenscreen compositing from base_env.py) is applied. Directly
+        accessing camera.get_images()["Color"] skips the overlay, producing
+        raw sim textures that don't match the live frame.
 
         Args:
             camera_name: Name of camera to render from (e.g. "overhead_camera")
@@ -239,12 +248,8 @@ class CGVDWrapper(gym.Wrapper):
         """
         self._hide_robot()
         try:
-            scene = self.env.unwrapped._scene
-            scene.update_render()
-            camera = self.env.unwrapped._cameras[camera_name]
-            camera.take_picture()
-            images = camera.get_images()
-            color_rgba = images["Color"]  # float32 [0,1] (H, W, 4)
+            obs = self.env.unwrapped.get_obs()
+            color_rgba = obs['image'][camera_name]['Color']  # float32 [0,1] (H, W, 4)
             return (np.clip(color_rgba[..., :3], 0, 1) * 255).astype(np.uint8)
         finally:
             self._show_robot()
@@ -358,6 +363,7 @@ class CGVDWrapper(gym.Wrapper):
 
         best_label = -1
         best_score = -1.0
+        best_pixel_count = 0
 
         for label_id in range(1, num_labels):
             component = (labels == label_id)
@@ -369,13 +375,21 @@ class CGVDWrapper(gym.Wrapper):
             # Average votes: how consistently was this region detected?
             avg_votes = float(self._target_votes[component].mean())
 
-            # Distractor overlap: fraction of component covered by distractor mask
-            if self.cached_distractor_mask is not None:
-                dist_overlap = float(np.logical_and(
-                    component, self.cached_distractor_mask > 0.5
-                ).sum()) / max(pixel_count, 1)
-            else:
-                dist_overlap = 0.0
+            # Max IoU against individual distractor masks
+            # Combined distractor mask saturates at high distractor counts;
+            # per-distractor IoU discriminates at any count.
+            max_dist_iou = 0.0
+            max_dist_name = None
+            for d_name, d_mask in self.distractor_individual_masks.items():
+                d_binary = d_mask > 0.5
+                intersection = float(np.logical_and(component, d_binary).sum())
+                if intersection == 0:
+                    continue
+                union = float(component.sum() + d_binary.sum() - intersection)
+                iou = intersection / max(union, 1.0)
+                if iou > max_dist_iou:
+                    max_dist_iou = iou
+                    max_dist_name = d_name
 
             # Find best genuineness among instances overlapping this component
             best_genuineness = 0.0
@@ -395,20 +409,20 @@ class CGVDWrapper(gym.Wrapper):
                         best_genuine_name = inst_name
                         best_safe_score = self.safe_scores.get(inst_name, 0.0)
 
-            # Score: consistency * (1 - distractor contamination) * genuineness factor * safe_score
-            # safe_score ensures high-confidence detections win over fragments
-            overlap_penalty = min(dist_overlap, self.overlap_penalty_cap)
+            # Score: pixel_count as tiebreaker, penalize by max per-distractor IoU
+            overlap_penalty = min(max_dist_iou, self.overlap_penalty_cap)
             genuineness_factor = 1.0 + best_genuineness  # genuineness_weight=1.0 baked in
-            score = avg_votes * (1.0 - overlap_penalty) * genuineness_factor * best_safe_score
+            score = pixel_count * avg_votes * (1.0 - overlap_penalty) * genuineness_factor * best_safe_score
 
             self._log(f"[CGVD] Layer 3: component {label_id}: "
                       f"pixels={pixel_count}, avg_votes={avg_votes:.1f}, "
-                      f"dist_overlap={dist_overlap:.2f}, genuineness={best_genuineness:.3f} "
-                      f"({best_genuine_name}), safe_score={best_safe_score:.3f}, score={score:.3f}")
+                      f"max_dist_iou={max_dist_iou:.3f} ({max_dist_name}), genuineness={best_genuineness:.3f} "
+                      f"({best_genuine_name}), safe_score={best_safe_score:.3f}, score={score:.1f}")
 
             if score > best_score:
                 best_score = score
                 best_label = label_id
+                best_pixel_count = pixel_count
 
         if best_label > 0:
             kept = (labels == best_label).astype(np.float32)
@@ -797,23 +811,31 @@ class CGVDWrapper(gym.Wrapper):
         # The VLA never sees warmup frames — they are consumed internally by
         # reset() which steps the env with no-op actions.
         if self.frame_count <= self.safeset_warmup_frames:
-            # On the LAST warmup frame, pre-compute the clean plate using the
-            # real image (with robot) + full inpaint mask (distractors + robot).
-            # We use the real image rather than the robot-free render because
-            # SAPIEN's IBL renderer recomputes lighting when the robot is hidden,
-            # causing a global color shift that creates visible seams at
-            # distractor boundaries during compositing.  The robot-free image
-            # is still used for SAM3 queries where color accuracy is irrelevant.
-            if (self.frame_count == self.safeset_warmup_frames
-                    and not self.disable_inpaint
-                    and self.inpainter is not None):
-                cache_mask = self._build_inpaint_mask()
+            # Last warmup frame: inpaint robot-free render to create clean plate.
+            # _hide_robot() uses set_visible(False) which preserves segmentation
+            # actor IDs, so the overlay texture matches the live frame exactly.
+            if (self.frame_count == self.safeset_warmup_frames and
+                    self.cached_inpainted_image is None and
+                    self.inpainter is not None):
+                inpaint_mask = self._build_inpaint_mask()
                 self.cached_inpainted_image = self.inpainter.inpaint(
-                    image, cache_mask, dilate_mask=0
+                    safe_query_image, inpaint_mask, dilate_mask=0
                 )
                 self.last_lama_time = self.inpainter.last_inpaint_time
                 self.total_lama_time += self.last_lama_time
-                self._log("[CGVD] Pre-computed clean plate from real image (last warmup frame)")
+                self._log(f"[CGVD] Clean plate from robot-free warmup render "
+                          f"(mask coverage={inpaint_mask.sum() / inpaint_mask.size * 100:.1f}%)")
+                # Save diagnostic images
+                if self.save_debug_images and self.episode_debug_dir:
+                    diag_dir = os.path.join(self.episode_debug_dir, "lama_diag")
+                    os.makedirs(diag_dir, exist_ok=True)
+                    cv2.imwrite(os.path.join(diag_dir, "source.png"),
+                                cv2.cvtColor(safe_query_image, cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(os.path.join(diag_dir, "mask.png"),
+                                (inpaint_mask * 255).astype(np.uint8))
+                    cv2.imwrite(os.path.join(diag_dir, "inpainted.png"),
+                                cv2.cvtColor(self.cached_inpainted_image, cv2.COLOR_RGB2BGR))
+
             if self.save_debug_images:
                 self._save_debug_images(image, self.cached_mask, safe_query_image,
                                         query_image=safe_query_image)
@@ -822,16 +844,14 @@ class CGVDWrapper(gym.Wrapper):
             return obs
 
         # Apply visual distillation to remove distractors
-        # Clean plate is pre-computed during warmup from the real image.
         if self.disable_inpaint:
             # Ablation: Mean-color fill instead of inpainting
             distilled = self._apply_mean_fill(image, self.cached_mask)
         else:
-            # Periodic refresh of cached background (disabled by default,
-            # cached_mask is stable so refresh only causes visual jumps)
+            # Periodic refresh of cached background (disabled by default)
             if (self.cache_refresh_interval > 0 and
                     self.frame_count % self.cache_refresh_interval == 0):
-                cache_mask = self._build_inpaint_mask()
+                cache_mask = self.cached_mask.copy()
                 self.cached_inpainted_image = self.inpainter.inpaint(image, cache_mask, dilate_mask=0)
                 if self.verbose:
                     print(f"[CGVD] Cache refresh at frame {self.frame_count}")
