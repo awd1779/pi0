@@ -287,7 +287,7 @@ class GR00TBatchEvaluator:
                 presence_threshold=self.cgvd_safe_threshold,
                 use_mock_segmenter=False,
                 use_server_segmenter=True,  # GR00T env needs SAM3 server
-                include_robot=False,
+                include_robot=True,
                 verbose=self.cgvd_verbose,
                 save_debug_images=self.cgvd_save_debug,
                 debug_dir=debug_dir,

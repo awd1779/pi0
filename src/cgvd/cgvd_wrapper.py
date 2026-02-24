@@ -232,6 +232,41 @@ class CGVDWrapper(gym.Wrapper):
         except Exception as e:
             self._log(f"[CGVD] Warning: could not show robot: {e}")
 
+    def _read_camera_segmentation(self, camera_name: str) -> Optional[np.ndarray]:
+        """Read Segmentation texture directly from the camera's render buffer.
+
+        Reads the already-rendered buffer without triggering a re-render.
+        Must be called BEFORE any re-renders (e.g., _render_robot_free_image)
+        to capture the robot-visible segmentation.
+
+        Returns:
+            Segmentation array (H, W, 4) uint32, or None if unavailable
+        """
+        try:
+            camera = self.env.unwrapped._cameras[camera_name]
+            return camera.camera.get_uint32_texture("Segmentation")
+        except (AttributeError, KeyError):
+            return None
+
+    def _get_robot_mask_from_segmentation(self) -> Optional[np.ndarray]:
+        """Extract pixel-perfect robot mask from cached renderer segmentation.
+
+        Uses the Segmentation texture (actor-level IDs) instead of SAM3,
+        giving crisp binary boundaries with zero jitter. Reads from
+        self._current_segmentation which was captured at the top of
+        _apply_cgvd() before any robot-free re-renders.
+
+        Returns:
+            Binary robot mask (H, W) float32, or None if Segmentation unavailable
+        """
+        seg = self._current_segmentation
+        if seg is None:
+            return None
+        actor_seg = seg[..., 1]  # channel 1 = actor-level IDs
+        robot_link_ids = self.env.unwrapped.robot_link_ids
+        return np.isin(actor_seg, robot_link_ids).astype(np.float32)
+
+
     def _render_robot_free_image(self, camera_name: str) -> np.ndarray:
         """Re-render scene with robot hidden to get unoccluded view for SAM3.
 
@@ -585,6 +620,10 @@ class CGVDWrapper(gym.Wrapper):
         # IMPORTANT: Get camera name to ensure we write back to the same camera
         image, camera_name = self._get_image_and_camera(obs)
 
+        # Cache segmentation BEFORE any re-renders (_render_robot_free_image
+        # overwrites camera buffers with robot-hidden data).
+        self._current_segmentation = self._read_camera_segmentation(camera_name)
+
         if not self.distractor_names:
             # No distractors specified - return image unchanged
             if self.verbose and self.frame_count == 0:
@@ -735,23 +774,24 @@ class CGVDWrapper(gym.Wrapper):
                     print(f"[CGVD] Safe-set mask: {cov:.1f}% (frame {self.frame_count}, {status})")
 
             # Step 3b: Robot mask - tracked every frame
+            # Pixel-perfect mask from renderer segmentation (no SAM3)
             if self.include_robot:
-                robot_concepts = "robot arm. robot gripper"
-                robot_image = image
-                robot_mask = self.segmenter.segment(
-                    robot_image, robot_concepts, presence_threshold=self.robot_presence_threshold
-                )
-                self.safe_scores.update(self.segmenter.last_scores)
-                self.last_robot_mask = robot_mask  # Store for compositing
-                if in_warmup:
-                    if self.cached_robot_mask is None:
-                        self.cached_robot_mask = robot_mask.copy()
-                    else:
-                        self.cached_robot_mask = np.maximum(self.cached_robot_mask, robot_mask)
-                # Combine cached target+anchor with fresh robot mask
-                safe_mask = np.maximum(self.cached_safe_mask, robot_mask)
-                if self.verbose:
-                    print(f"[CGVD] Robot mask (threshold={self.robot_presence_threshold}): {robot_mask.sum() / robot_mask.size * 100:.1f}%")
+                robot_mask = self._get_robot_mask_from_segmentation()
+                if robot_mask is not None:
+                    self.safe_scores["robot"] = 1.0
+                    self.last_robot_mask = robot_mask  # Store for compositing
+                    if in_warmup:
+                        if self.cached_robot_mask is None:
+                            self.cached_robot_mask = robot_mask.copy()
+                        else:
+                            self.cached_robot_mask = np.maximum(self.cached_robot_mask, robot_mask)
+                    # Combine cached target+anchor with fresh robot mask
+                    safe_mask = np.maximum(self.cached_safe_mask, robot_mask)
+                    if self.verbose:
+                        print(f"[CGVD] Robot mask: {robot_mask.sum() / robot_mask.size * 100:.1f}%")
+                else:
+                    self._log("[CGVD] WARNING: Robot mask unavailable this frame")
+                    safe_mask = self.cached_safe_mask
             else:
                 safe_mask = self.cached_safe_mask
 
@@ -898,13 +938,6 @@ class CGVDWrapper(gym.Wrapper):
         if self.blend_sigma > 0:
             feathered = cv2.GaussianBlur(mask, (0, 0), sigmaX=self.blend_sigma, sigmaY=self.blend_sigma)
 
-            safe = self.current_safe_mask if self.current_safe_mask is not None else self.cached_safe_mask
-
-            # Defense-in-depth: binarize safe mask so all gating uses clean 0/1 values.
-            # Prevents soft SAM3 values from leaking through Mechanism 2 or re-enforcement.
-            if safe is not None:
-                safe = (safe > 0.5).astype(np.float32)
-
             # Binary target/anchor mask — immune to soft-value leakage from SAM3.
             # Stationary objects with crisp boundaries get hard 0/1 protection.
             binary_target = (
@@ -937,22 +970,30 @@ class CGVDWrapper(gym.Wrapper):
                     non_safe_distractor = binary_distractor
                 feathered = np.maximum(feathered, non_safe_distractor)
 
-            # Re-enforce safe-set pixels so they always show the live frame.
-            # safe (binarized) includes target+anchor+robot from SAM3; binary_target
-            # (dilated) provides extra halo protection for the stationary target/anchor.
-            # Robot uses raw SAM3 mask — re-enforcement shows the live frame directly,
-            # so the 1-2px SAM3 boundary under-segmentation is imperceptible.
-            if safe is not None:
-                reinforce_mask = np.maximum(safe, binary_target)
-                feathered = feathered * (1.0 - reinforce_mask)
+            # Re-enforce target/anchor only (robot handled by hard-paste below).
+            if binary_target is not None:
+                feathered = feathered * (1.0 - binary_target)
 
             feathered_3d = feathered[..., None]
-            return (feathered_3d * inpainted.astype(np.float32) +
-                    (1.0 - feathered_3d) * image.astype(np.float32)).astype(np.uint8)
+            result = (feathered_3d * inpainted.astype(np.float32) +
+                      (1.0 - feathered_3d) * image.astype(np.float32)).astype(np.uint8)
+
+            # Hard-paste robot from live frame as final step (pixel-perfect).
+            # This guarantees the robot arm is always fully visible regardless
+            # of feathering/Mechanism 2 interactions.
+            if self.last_robot_mask is not None:
+                robot_binary = self.last_robot_mask > 0.5
+                result[robot_binary] = image[robot_binary]
+
+            return result
         else:
             # Hard compositing (original behavior, sigma=0)
             mask_3d = mask[..., None] > 0.5
-            return np.where(mask_3d, inpainted, image)
+            result = np.where(mask_3d, inpainted, image)
+            if self.last_robot_mask is not None:
+                robot_binary = self.last_robot_mask > 0.5
+                result[robot_binary] = image[robot_binary]
+            return result
 
     def _build_inpaint_mask(self) -> np.ndarray:
         """Build inpainting mask: distractors + robot.
