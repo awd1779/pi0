@@ -1,0 +1,164 @@
+\section{Methodology}
+\label{sec:methodology}
+
+We present \emph{Concept-Gated Visual Distillation} (CGVD), a training-free, model-agnostic inference-time framework that selectively removes distractor objects from a robot's visual observations while preserving task-relevant entities. CGVD operates as a perception wrapper around any Vision-Language-Action (VLA) policy, requiring no fine-tuning or policy modification. The key insight is that a language instruction already specifies which objects matter; CGVD leverages this signal to \emph{gate} visual content, allowing only task-relevant information through to the downstream policy.
+
+%--------------------------------------------------------------
+\subsection{Problem Formulation}
+\label{sec:problem}
+
+Consider a manipulation task specified by a language instruction $l$ (e.g., ``put the spoon on the towel'') executed by a VLA policy $\pi(a_t \mid o_t, l)$ that maps an observation $o_t \in \mathbb{R}^{H \times W \times 3}$ and instruction to an action $a_t$. In cluttered environments, $o_t$ contains distractor objects that are semantically or visually confusable with the task-relevant objects. These distractors degrade $\pi$ by introducing ambiguity in visual grounding---for instance, a spatula may be grasped instead of a spoon.
+
+CGVD defines a distillation function $\phi$ that produces a \emph{clean} observation $\hat{o}_t = \phi(o_t, l)$ in which distractors are replaced with plausible background while the target object, anchor (receptacle), and robot arm are preserved. The downstream policy then acts on the distilled observation: $a_t = \pi(\hat{o}_t, l)$. Because $\phi$ is applied at inference time and interacts with $\pi$ only through the observation interface, it is agnostic to the policy architecture.
+
+%--------------------------------------------------------------
+\subsection{Concept-Gated Decomposition}
+\label{sec:decomposition}
+
+CGVD begins by parsing the language instruction $l$ to extract a \emph{target concept} $c_{\text{tgt}}$ and an \emph{anchor concept} $c_{\text{anc}}$. For instance, ``put the spoon on the towel'' yields $c_{\text{tgt}} = \texttt{spoon}$ and $c_{\text{anc}} = \texttt{towel}$. Parsing uses deterministic pattern matching against known task templates with a heuristic noun-extraction fallback, requiring no external language model. These concepts define two complementary sets that partition the scene:
+\begin{itemize}
+    \item The \textbf{safe set} $\mathcal{S} = \{c_{\text{tgt}},\; c_{\text{anc}},\; \text{robot}\}$: entities that must remain visible.
+    \item The \textbf{distractor set} $\mathcal{D} = \{d_1, \ldots, d_K\}$: semantic categories that may appear as clutter (e.g., \texttt{ladle}, \texttt{spatula}, \texttt{fork}).
+\end{itemize}
+
+This language-grounded decomposition is what makes the approach \emph{concept-gated}: the instruction determines the gate, and only objects outside the gate are candidates for removal. Unlike prior work that relies on large language models to determine object relevance~\cite{byovla}, our parsing is deterministic and incurs no additional inference cost.
+
+%--------------------------------------------------------------
+\subsection{Text-Prompted Instance Segmentation}
+\label{sec:segmentation}
+
+Both the safe set and distractor set are segmented from the observation using SAM\,3~\cite{sam3}, a text-prompted instance segmentation model. Each semantic concept is queried \emph{independently} as a single-word text prompt, and all resulting instance masks for that concept are merged via element-wise maximum. The two sets produce independent mask channels:
+\begin{align}
+    M_{\text{dist}} &= \textstyle\bigcup_{d_k \in \mathcal{D}} \textsc{Seg}(o_t,\, d_k), \label{eq:distractor_mask} \\
+    M_{\text{safe}} &= \textsc{Seg}(o_t,\, c_{\text{tgt}}) \,\cup\, \textsc{Seg}(o_t,\, c_{\text{anc}}), \label{eq:safe_mask}
+\end{align}
+where $\textsc{Seg}(o, c)$ denotes the union of all instance masks returned by SAM\,3 for concept $c$ in observation $o$. An important computational optimization is that the vision encoder is executed \emph{once per image}, with its embeddings reused across all $|\mathcal{S}| + |\mathcal{D}|$ text-conditioned mask decoder passes, amortizing the cost of the image backbone.
+
+\paragraph{Asymmetric thresholding.}
+We apply a strict confidence threshold $\tau_{\text{dist}}$ for distractor detections to reduce false positives and a permissive threshold $\tau_{\text{safe}} \ll \tau_{\text{dist}}$ for safe-set detections. The asymmetry reflects the cost structure of errors: falsely protecting a distractor is conservative (potentially causing task failure), while failing to protect the target is catastrophic (removing the object the policy needs to manipulate).
+
+\paragraph{Robot mask from renderer segmentation.}
+Rather than querying SAM\,3 for the robot arm---which would be unreliable due to the arm's articulated, metallic appearance---we obtain the robot mask directly from the simulator's segmentation buffer using per-link actor IDs. This yields a pixel-perfect binary mask with zero frame-to-frame jitter, which is critical for the compositing stage (\S\ref{sec:compositing}).
+
+\paragraph{Robot-free initialization.}
+During a single-frame warmup at $t{=}0$, the robot mesh is momentarily hidden via visibility toggling, providing the segmentation model with an unoccluded view of the workspace. This ensures that target and distractor masks are generated without arm-induced occlusion. The same robot-free render serves as the source image for clean-plate inpainting (\S\ref{sec:inpainting}).
+
+%--------------------------------------------------------------
+\subsection{Three-Layer Target Refinement}
+\label{sec:refinement}
+
+A persistent challenge in text-prompted segmentation is \emph{semantic confusion}: objects that share visual or linguistic similarity with the target (e.g., a ladle detected as ``spoon'') may appear in both $M_{\text{safe}}$ and $M_{\text{dist}}$. We address this through a three-layer refinement pipeline applied to the target mask during warmup.
+
+\subsubsection{Layer 1: Cross-Validation Scoring}
+\label{sec:crossval}
+
+For each target instance $s_i$ returned by SAM\,3, we compute a \emph{genuineness score} that measures the confidence differential between the safe-set and distractor identities:
+\begin{equation}
+    g(s_i) = \sigma_{\text{safe}}(s_i) \;-\; \max_{\substack{d_j \in \mathcal{D} \\ \text{IoU}(s_i, d_j) > \eta}} \sigma_{\text{dist}}(d_j),
+    \label{eq:genuineness}
+\end{equation}
+where $\sigma_{\text{safe}}(s_i)$ is the SAM\,3 confidence for instance $s_i$ under the target concept, $\sigma_{\text{dist}}(d_j)$ is the confidence of a spatially overlapping distractor detection $d_j$, and $\eta$ is an IoU threshold. A genuine target---e.g., a real spoon---yields $g > 0$ because it is confidently detected as ``spoon'' but only weakly as any distractor label. An imposter---e.g., a ladle masquerading as ``spoon''---yields $g < 0$ because its distractor-label confidence (``ladle'') exceeds its target-label confidence. Crucially, negative genuineness values are preserved (not clamped to zero), allowing imposters to be actively penalized in downstream scoring.
+
+Anchor detections are never filtered, as over-protecting the receptacle carries negligible cost.
+
+\subsubsection{Layer 2: Temporal Accumulation}
+\label{sec:accumulation}
+
+Because SAM\,3 detection scores can fluctuate significantly between frames---we observe target scores dropping to zero on individual frames---we accumulate the target mask across warmup frames via element-wise maximum:
+\begin{equation}
+    M_{\text{tgt}}^{(T)} = \max_{t=1}^{T} \, M_{\text{tgt}}^{(t)},
+    \label{eq:accumulation}
+\end{equation}
+where $T$ is the number of warmup frames. This monotonic union ensures that $M_{\text{tgt}}$ grows but never shrinks, preventing transient score drops from erasing previously detected pixels. A per-pixel vote counter $V(p)$ records in how many of the $T$ frames each pixel $p$ was detected, providing a consistency signal for Layer~3.
+
+\subsubsection{Layer 3: Spatial Disambiguation}
+\label{sec:spatial}
+
+After warmup, the accumulated target mask may contain spatially disjoint components corresponding to different physical objects (e.g., both the real spoon and a spatula detected as ``spoon'' on different frames). We disambiguate these via connected-component analysis. For each component $C_k$, we compute a composite score:
+\begin{equation}
+    \text{score}(C_k) = |C_k| \;\cdot\; \bar{V}(C_k) \;\cdot\; \bigl(1 - \rho(C_k)\bigr) \;\cdot\; \bigl(1 + g^*(C_k)\bigr) \;\cdot\; \sigma^*(C_k),
+    \label{eq:layer3}
+\end{equation}
+where $|C_k|$ is the pixel count, $\bar{V}(C_k)$ is the mean vote count (detection consistency), $\rho(C_k) = \min(\max_j \text{IoU}(C_k, d_j),\, \rho_{\text{cap}})$ is a capped distractor-overlap penalty, $g^*(C_k)$ is the best genuineness score among overlapping safe-set instances, and $\sigma^*(C_k)$ is the best SAM\,3 safe-set confidence. The five multiplicative factors respectively favor large, consistently detected, distractor-free, genuine, and high-confidence components. Only the top-scoring component is retained; all others are discarded from the target mask.
+
+%--------------------------------------------------------------
+\subsection{Concept-Gated Mask Composition}
+\label{sec:gating}
+
+The refined masks are combined into a final inpainting mask via set-theoretic gating:
+\begin{equation}
+    M_{\text{inp}} = \text{dilate}(M_{\text{dist}},\, r_d) \;\setminus\; \text{dilate}(M_{\text{safe}},\, r_s),
+    \label{eq:gating}
+\end{equation}
+where $r_d$ is a distractor dilation radius that captures shadows and boundary artifacts around distractors, and $r_s \geq r_d$ is a safe-set dilation radius that creates a protective buffer preventing distractor dilation from encroaching on task objects. All masks are binarized with a threshold of $0.5$ before dilation to eliminate soft-value artifacts from SAM\,3's probabilistic outputs.
+
+A critical design decision is that the robot mask is \emph{excluded} from $M_{\text{safe}}$ during this gating step. Including it would cause the gated mask to change shape every frame as the arm moves, producing temporally inconsistent feathered blending values and visible flicker. Instead, robot visibility is enforced downstream in the compositing stage via a separate hard-paste mechanism (\S\ref{sec:compositing}).
+
+%--------------------------------------------------------------
+\subsection{Clean-Plate Generation via Inpainting}
+\label{sec:inpainting}
+
+We generate a single \emph{clean plate}---an image of the scene with distractors and robot removed---by applying LaMa~\cite{lama}, a Fourier convolution-based inpainting model, to the robot-free initialization frame. The inpainting mask is constructed as:
+\begin{equation}
+    M_{\text{lama}} = M_{\text{inp}} \;\cup\; \text{dilate}(M_{\text{robot}},\, r_e),
+    \label{eq:inpaint_mask}
+\end{equation}
+where $M_{\text{robot}}$ is the accumulated robot mask from warmup and $r_e$ is an extended dilation radius that accounts for the Gaussian blur spread in subsequent compositing. LaMa fills the masked regions with photorealistic background texture, preserving spatial cues such as table edges, surface textures, and receptacle boundaries that are critical for manipulation.
+
+The clean plate is computed \emph{once} per episode and cached for all subsequent frames, making the runtime cost of CGVD dominated by a single $\mathcal{O}(1)$ alpha-blending operation per frame rather than repeated neural network inference.
+
+%--------------------------------------------------------------
+\subsection{Temporally Consistent Compositing}
+\label{sec:compositing}
+
+At each timestep $t > 0$, the distilled observation is produced by blending the live camera frame $o_t$ with the cached clean plate $\hat{o}_{\text{clean}}$ using the compositing mask. The blending pipeline consists of four stages designed to eliminate visual artifacts while maintaining temporal consistency.
+
+\paragraph{Stage 1: Feathered blending.}
+The binary compositing mask $M_{\text{comp}}$ (computed from \emph{undilated} distractor boundaries to avoid over-extension) is smoothed via Gaussian blur with standard deviation $\sigma_b$:
+\begin{equation}
+    \alpha = \mathcal{G}_{\sigma_b} * M_{\text{comp}},
+    \label{eq:feather}
+\end{equation}
+producing a smooth $[0, 1]$ transition zone that avoids hard seams between inpainted and live regions.
+
+\paragraph{Stage 2: Distractor clamping.}
+To prevent soft blur values at distractor boundaries from allowing partial distractor visibility, we clamp $\alpha$ to $1.0$ at all distractor pixels not protected by the safe set:
+\begin{equation}
+    \alpha \leftarrow \max\bigl(\alpha,\; \mathbb{1}[M_{\text{dist}} > 0.5] \cdot \mathbb{1}[M_{\text{safe}}^{+} \leq 0.5]\bigr),
+    \label{eq:mechanism2}
+\end{equation}
+where $M_{\text{safe}}^{+}$ is the safe-set mask dilated to cover the blur spread. Both masks are binarized before multiplication to prevent soft SAM\,3 edge values from producing incomplete clamping.
+
+\paragraph{Stage 3: Safe-set re-enforcement.}
+To guarantee that target and anchor objects always display from the live frame, we zero out $\alpha$ inside an extended safe-set region:
+\begin{equation}
+    \alpha \leftarrow \alpha \cdot \bigl(1 - \mathbb{1}[M_{\text{safe}}^{+} > 0.5]\bigr).
+    \label{eq:reinforce}
+\end{equation}
+The extended dilation radius ($r_s + 3\lceil\sigma_b\rceil$ pixels) ensures that the Gaussian blur's tail ($<2\%$ energy beyond $3\sigma$) does not bleed table texture into the object boundary.
+
+\paragraph{Stage 4: Robot hard-paste.}
+The final composited image is obtained via alpha blending, followed by a pixel-level overwrite using the renderer-derived robot mask:
+\begin{equation}
+    \hat{o}_t(p) = \begin{cases}
+        o_t(p) & \text{if } M_{\text{robot}}(p) > 0.5, \\
+        \alpha(p) \cdot \hat{o}_{\text{clean}}(p) + (1-\alpha(p)) \cdot o_t(p) & \text{otherwise}.
+    \end{cases}
+    \label{eq:composite}
+\end{equation}
+Because the robot mask is obtained from the renderer's segmentation buffer rather than a neural network, it provides pixel-perfect, jitter-free boundaries that guarantee the robot arm is always fully visible regardless of any upstream blending artifacts.
+
+%--------------------------------------------------------------
+\subsection{Summary of Design Principles}
+\label{sec:principles}
+
+The CGVD pipeline embodies several design principles that collectively enable robust distractor removal:
+
+\begin{enumerate}
+    \item \textbf{Independence of segmentation passes.} Safe-set and distractor masks are computed from separate SAM\,3 queries, preventing error propagation between the two channels.
+    \item \textbf{Asymmetric error costs.} Thresholds, dilation radii, and filtering logic are all tuned under the principle that failing to protect a task object is strictly worse than failing to remove a distractor.
+    \item \textbf{Monotonic mask accumulation.} Safe-set masks grow but never shrink during warmup, ensuring transient segmentation failures do not erase previously detected objects.
+    \item \textbf{Decoupled robot handling.} The robot mask is obtained from the renderer (not SAM\,3) and applied via hard-paste compositing rather than mask gating, eliminating frame-to-frame flicker caused by the moving arm.
+    \item \textbf{Single-shot inpainting.} The clean plate is generated once and composited via cheap alpha blending, making CGVD's per-frame overhead negligible after initialization.
+\end{enumerate}
+
