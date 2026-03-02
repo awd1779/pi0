@@ -59,6 +59,7 @@ DRY_RUN=""
 RECORDING=""
 CGVD_DEBUG=""
 CGVD_VERBOSE=""
+FRAME_COMPARISON=""
 RANDOMIZE_DISTRACTORS=""
 
 # CGVD thresholds
@@ -126,6 +127,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --cgvd_verbose|--verbose)
             CGVD_VERBOSE="--cgvd_verbose"
+            shift
+            ;;
+        --save_frame_comparison|--frame_comparison)
+            FRAME_COMPARISON="--save_frame_comparison"
             shift
             ;;
         --randomize_distractors)
@@ -258,7 +263,7 @@ CMD="xvfb-run -a -s \"-screen 0 1024x768x24\" $PYTHON_CMD scripts/clutter_eval/b
     --cgvd_safe_threshold $CGVD_SAFE_THRESHOLD \
     --cgvd_robot_threshold $CGVD_ROBOT_THRESHOLD \
     --cgvd_distractor_threshold $CGVD_DISTRACTOR_THRESHOLD \
-    $DRY_RUN $RECORDING $CGVD_DEBUG $CGVD_VERBOSE $RANDOMIZE_DISTRACTORS"
+    $DRY_RUN $RECORDING $CGVD_DEBUG $CGVD_VERBOSE $FRAME_COMPARISON $RANDOMIZE_DISTRACTORS"
 
 # Append optional overrides (only if set)
 if [[ -n "$PROMPT_OVERRIDE" ]]; then

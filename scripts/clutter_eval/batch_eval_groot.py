@@ -195,10 +195,12 @@ class GR00TBatchEvaluator:
         act_steps: int = 1,
         recording: bool = False,
         cgvd_save_debug: bool = False,
+        save_frame_comparison: bool = False,
         cgvd_verbose: bool = False,
         cgvd_safe_threshold: float = 0.6,
         cgvd_robot_threshold: float = 0.3,
         cgvd_distractor_threshold: float = 0.20,
+        save_attention: bool = False,
     ):
         self.model_path = model_path
         self.embodiment = embodiment
@@ -208,10 +210,12 @@ class GR00TBatchEvaluator:
         self.act_steps = act_steps
         self.recording = recording
         self.cgvd_save_debug = cgvd_save_debug
+        self.save_frame_comparison = save_frame_comparison
         self.cgvd_verbose = cgvd_verbose
         self.cgvd_safe_threshold = cgvd_safe_threshold
         self.cgvd_robot_threshold = cgvd_robot_threshold
         self.cgvd_distractor_threshold = cgvd_distractor_threshold
+        self.save_attention = save_attention
         self.cgvd_target_override = None
         self.cgvd_anchor_override = None
         self.prompt_override = None
@@ -234,6 +238,13 @@ class GR00TBatchEvaluator:
 
         self.model_load_time = time.time() - model_load_start
         print(f"Model loaded in {self.model_load_time:.2f}s")
+
+        # Set up attention capture after model is loaded
+        self.attention_capture = None
+        if save_attention:
+            from src.utils.attention_capture import GR00TAttentionCapture
+            self.attention_capture = GR00TAttentionCapture(self.model)
+
         if torch.cuda.is_available():
             allocated_gb = torch.cuda.memory_allocated(device) / 1e9
             reserved_gb = torch.cuda.memory_reserved(device) / 1e9
@@ -355,20 +366,19 @@ class GR00TBatchEvaluator:
 
         # Set up frame saving for baseline/CGVD comparison
         frames_dir = None
-        if self.cgvd_save_debug and output_dir:
+        if (self.cgvd_save_debug or self.save_frame_comparison) and output_dir:
             frames_dir = os.path.join(output_dir, "frames", f"episode_{episode_idx:03d}")
             os.makedirs(frames_dir, exist_ok=True)
 
         while True:
-            # Save raw observation frame for baseline vs CGVD comparison
-            if frames_dir is not None:
-                from simpler_env.utils.env.observation_utils import get_image_from_maniskill2_obs_dict
-                raw_image = get_image_from_maniskill2_obs_dict(env, obs)
-                frame_path = os.path.join(frames_dir, f"frame_{inference_step:04d}.png")
-                cv2.imwrite(frame_path, cv2.cvtColor(raw_image, cv2.COLOR_RGB2BGR))
-
             # GR00T inference: preprocess -> forward -> postprocess (numpy-based)
             inputs = self.env_adapter.preprocess(env, obs, instruction)
+
+            # Save VLA input (256x256, what GR00T actually sees) for comparison
+            if frames_dir is not None:
+                vla_image = inputs["image"]  # (H, W, 3) uint8 RGB, already resized
+                frame_path = os.path.join(frames_dir, f"frame_{inference_step:04d}.png")
+                cv2.imwrite(frame_path, cv2.cvtColor(vla_image, cv2.COLOR_RGB2BGR))
 
             start_inference = time.time()
             actions = self.model.forward(
@@ -378,6 +388,16 @@ class GR00TBatchEvaluator:
             )
             if cnt_step > 0:
                 inference_times.append(time.time() - start_inference)
+
+            # Save attention map if enabled
+            if self.attention_capture is not None and output_dir is not None:
+                attn_dir = os.path.join(output_dir, "attention")
+                os.makedirs(attn_dir, exist_ok=True)
+                attn_path = os.path.join(
+                    attn_dir, f"attention_{mode}_ep{episode_idx}_step{inference_step}.png"
+                )
+                self.attention_capture.save_attention_map(inputs["image"], attn_path)
+                self.attention_capture.clear()
 
             env_actions = self.env_adapter.postprocess(actions)
 
@@ -482,8 +502,26 @@ class GR00TBatchEvaluator:
                 break
         return None
 
+    @staticmethod
+    def _find_episode_dir(frames_root: str, ep_idx: int) -> Optional[str]:
+        """Find episode directory, handling _SUCCESS/_FAILED suffix."""
+        base = f"episode_{ep_idx:03d}"
+        exact = os.path.join(frames_root, base)
+        if os.path.exists(exact):
+            return exact
+        # Try with result suffix
+        for suffix in ("_SUCCESS", "_FAILED"):
+            path = os.path.join(frames_root, base + suffix)
+            if os.path.exists(path):
+                return path
+        return None
+
     def _generate_frame_comparisons(self, run_dir: str, num_episodes: int):
-        """Generate side-by-side comparison images of baseline vs CGVD frames."""
+        """Generate side-by-side comparison of VLA input: baseline vs CGVD.
+
+        Saved frames are the 256x256 images that GR00T actually sees.
+        Layout: Baseline | CGVD | |Diff|x3 | Diff Heatmap
+        """
         baseline_frames_root = os.path.join(run_dir, "baseline", "frames")
         cgvd_frames_root = os.path.join(run_dir, "cgvd", "frames")
         comparison_dir = os.path.join(run_dir, "frame_comparison")
@@ -495,18 +533,22 @@ class GR00TBatchEvaluator:
         font = cv2.FONT_HERSHEY_SIMPLEX
 
         for ep_idx in range(num_episodes):
-            ep_name = f"episode_{ep_idx:03d}"
-            baseline_ep_dir = os.path.join(baseline_frames_root, ep_name)
-            cgvd_ep_dir = os.path.join(cgvd_frames_root, ep_name)
+            baseline_ep_dir = self._find_episode_dir(baseline_frames_root, ep_idx)
+            cgvd_ep_dir = self._find_episode_dir(cgvd_frames_root, ep_idx)
 
-            if not os.path.exists(baseline_ep_dir) or not os.path.exists(cgvd_ep_dir):
+            if baseline_ep_dir is None or cgvd_ep_dir is None:
                 continue
 
-            ep_comparison_dir = os.path.join(comparison_dir, ep_name)
+            # Determine outcome for labeling
+            b_result = "SUCCESS" if "_SUCCESS" in os.path.basename(baseline_ep_dir) else "FAILED"
+            c_result = "SUCCESS" if "_SUCCESS" in os.path.basename(cgvd_ep_dir) else "FAILED"
+            ep_label = f"ep{ep_idx:03d}_B-{b_result}_C-{c_result}"
+
+            ep_comparison_dir = os.path.join(comparison_dir, ep_label)
             os.makedirs(ep_comparison_dir, exist_ok=True)
 
-            baseline_frames = sorted(os.listdir(baseline_ep_dir))
-            cgvd_frames = sorted(os.listdir(cgvd_ep_dir))
+            baseline_frames = sorted([f for f in os.listdir(baseline_ep_dir) if f.endswith(".png")])
+            cgvd_frames = sorted([f for f in os.listdir(cgvd_ep_dir) if f.endswith(".png")])
             num_frames = min(len(baseline_frames), len(cgvd_frames))
 
             for frame_idx in range(num_frames):
@@ -538,25 +580,35 @@ class GR00TBatchEvaluator:
                 # 4-column layout: Baseline | CGVD | |Diff|x3 | Heatmap
                 comparison = np.hstack([b_img, c_img, diff_vis, diff_heat])
 
-                # Labels
-                cv2.putText(comparison, "Baseline", (10, 30), font, 0.6, (255, 255, 255), 2)
-                cv2.putText(comparison, "CGVD", (w + 10, 30), font, 0.6, (0, 255, 0), 2)
-                cv2.putText(comparison, "|Diff| x3", (2 * w + 10, 30), font, 0.6, (255, 255, 0), 2)
-                cv2.putText(comparison, "Diff Heatmap", (3 * w + 10, 30), font, 0.6, (255, 255, 255), 2)
+                # Labels with resolution and episode outcome
+                cv2.putText(comparison, f"Baseline ({w}x{h}) [{b_result}]",
+                            (10, 25), font, 0.5, (255, 255, 255), 2)
+                cv2.putText(comparison, f"CGVD ({w}x{h}) [{c_result}]",
+                            (w + 10, 25), font, 0.5, (0, 255, 0), 2)
+                cv2.putText(comparison, "|Diff| x3",
+                            (2 * w + 10, 25), font, 0.5, (255, 255, 0), 2)
+                cv2.putText(comparison, "Diff Heatmap",
+                            (3 * w + 10, 25), font, 0.5, (255, 255, 255), 2)
 
-                # Max pixel difference annotation
+                # Stats annotation
                 max_diff = diff_gray.max()
                 mean_diff = diff_gray.mean()
+                pct_changed = (diff_gray > 5).sum() / diff_gray.size * 100
                 cv2.putText(
                     comparison,
-                    f"max={max_diff:.1f} mean={mean_diff:.2f}",
-                    (3 * w + 10, 55), font, 0.4, (200, 200, 200), 1,
+                    f"max={max_diff:.0f} mean={mean_diff:.1f} changed={pct_changed:.1f}%",
+                    (3 * w + 10, 50), font, 0.35, (200, 200, 200), 1,
                 )
+                # Frame number
+                cv2.putText(comparison, f"step {frame_idx}",
+                            (10, h - 10), font, 0.4, (180, 180, 180), 1)
 
                 cv2.imwrite(
                     os.path.join(ep_comparison_dir, f"compare_{frame_idx:04d}.png"),
                     comparison,
                 )
+
+            print(f"    Frame comparison: {ep_label} ({num_frames} frames)")
 
     def run_configuration(self, config: EvalConfig, config_output_dir: Optional[str] = None) -> ConfigResult:
         """Run a single configuration (both baseline and CGVD)."""
@@ -622,7 +674,7 @@ class GR00TBatchEvaluator:
         env.close()
 
         # Generate baseline vs CGVD comparison images
-        if self.cgvd_save_debug and run_dir:
+        if (self.cgvd_save_debug or self.save_frame_comparison) and run_dir:
             self._generate_frame_comparisons(run_dir, config.num_episodes)
 
         # Save log files
@@ -1205,7 +1257,11 @@ def main():
     parser.add_argument("--recording", action="store_true",
                        help="Save video recordings of each episode")
     parser.add_argument("--cgvd_save_debug", action="store_true")
+    parser.add_argument("--save_frame_comparison", action="store_true",
+                        help="Save VLA input frames (256x256) for baseline vs CGVD comparison")
     parser.add_argument("--cgvd_verbose", action="store_true")
+    parser.add_argument("--save_attention", action="store_true",
+                        help="Save attention map visualizations for each inference step")
 
     # Distractor randomization
     parser.add_argument("--randomize_distractors", action="store_true")
@@ -1291,10 +1347,12 @@ def main():
         act_steps=args.act_steps,
         recording=args.recording,
         cgvd_save_debug=args.cgvd_save_debug,
+        save_frame_comparison=args.save_frame_comparison,
         cgvd_verbose=args.cgvd_verbose,
         cgvd_safe_threshold=args.cgvd_safe_threshold,
         cgvd_robot_threshold=args.cgvd_robot_threshold,
         cgvd_distractor_threshold=args.cgvd_distractor_threshold,
+        save_attention=args.save_attention,
     )
 
     evaluator.prompt_override = args.prompt
