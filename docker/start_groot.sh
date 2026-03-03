@@ -1,15 +1,43 @@
 #!/bin/bash
 
-# --- Pull latest code from GitHub ---
-echo "Updating code from GitHub..."
+# --- Pull latest code from GitHub (with retry for RunPod DNS startup delay) ---
+REPO_URL="https://github.com/awd1779/pi0.git"
+BRANCH="${GIT_BRANCH:-main}"
+MAX_RETRIES=5
+RETRY_DELAY=10
+
 cd /app
-git clone --depth 1 https://github.com/awd1779/pi0.git open-pi-zero-tmp 2>/dev/null
-if [ -d open-pi-zero-tmp ]; then
-    rsync -a --exclude='checkpoints' --exclude='logs' open-pi-zero-tmp/ open-pi-zero/
+CLONE_OK=false
+for attempt in $(seq 1 $MAX_RETRIES); do
+    echo "Cloning $REPO_URL (branch: $BRANCH) — attempt $attempt/$MAX_RETRIES..."
     rm -rf open-pi-zero-tmp
-    echo "Code updated to latest."
+    if git clone --depth 1 --branch "$BRANCH" "$REPO_URL" open-pi-zero-tmp; then
+        CLONE_OK=true
+        break
+    fi
+    echo "  Clone failed, retrying in ${RETRY_DELAY}s..."
+    sleep $RETRY_DELAY
+done
+
+if [ "$CLONE_OK" = true ]; then
+    # --delete removes files that were deleted from the repo
+    rsync -a --delete \
+        --exclude='checkpoints' \
+        --exclude='logs' \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        open-pi-zero-tmp/ open-pi-zero/
+    COMMIT=$(git -C open-pi-zero-tmp log --oneline -1 2>/dev/null || echo "unknown")
+    rm -rf open-pi-zero-tmp
+    echo "Code updated to: $COMMIT"
 else
-    echo "WARNING: Could not clone repo, using baked-in code."
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "FATAL: Failed to clone after $MAX_RETRIES attempts."
+    echo "  URL: $REPO_URL  Branch: $BRANCH"
+    echo "  Refusing to run with stale baked-in code."
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    rm -rf open-pi-zero-tmp
+    exit 1
 fi
 cd /app/open-pi-zero
 

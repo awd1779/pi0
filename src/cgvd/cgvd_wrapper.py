@@ -59,6 +59,9 @@ class CGVDWrapper(gym.Wrapper):
         # Ablation parameters
         disable_safeset: bool = False,
         disable_inpaint: bool = False,
+        use_gt_masks: bool = False,
+        use_gt_background: bool = False,
+        disable_compositing: bool = False,
         # Legacy parameters (ignored, kept for backwards compatibility)
         use_inpaint: bool = True,
         # SAM3 concept prompt overrides
@@ -128,6 +131,9 @@ class CGVDWrapper(gym.Wrapper):
         # Ablation flags
         self.disable_safeset = disable_safeset
         self.disable_inpaint = disable_inpaint
+        self.use_gt_masks = use_gt_masks
+        self.use_gt_background = use_gt_background
+        self.disable_compositing = disable_compositing
 
         # SAM3 concept prompt overrides
         self.target_override = target_override
@@ -136,13 +142,22 @@ class CGVDWrapper(gym.Wrapper):
         # Initialize LaMa inpainter using singleton (unless disabled for ablation)
         # Using singleton avoids redundant model loading when multiple CGVDWrapper
         # instances are created (e.g., in batch evaluation)
-        if not self.disable_inpaint:
+        if not self.disable_inpaint and not self.use_gt_background:
             from src.cgvd.lama_inpainter import get_lama_inpainter
             self.inpainter = get_lama_inpainter(device="cuda")
         else:
             self.inpainter = None
             if self.verbose:
-                print("[CGVD] Ablation: Inpainting DISABLED (using mean-color fill)")
+                if self.use_gt_background:
+                    print("[CGVD] Ablation: GT background enabled (sim render, no LaMa)")
+                elif self.disable_inpaint:
+                    print("[CGVD] Ablation: Inpainting DISABLED (using mean-color fill)")
+
+        if self.verbose:
+            if self.use_gt_masks:
+                print("[CGVD] Ablation: GT segmentation masks enabled (bypassing SAM3)")
+            if self.disable_compositing:
+                print("[CGVD] Ablation: Passthrough mode (pipeline runs but original image returned)")
 
         # Create debug directory if needed
         if self.save_debug_images:
@@ -153,12 +168,16 @@ class CGVDWrapper(gym.Wrapper):
 
         # Initialize components using singleton for segmenter
         # This avoids redundant model loading across CGVDWrapper instances
-        self.segmenter = get_sam3_segmenter(
-            use_mock=use_mock_segmenter,
-            use_server=use_server_segmenter,
-            model_name=segmenter_model,
-            presence_threshold=presence_threshold,
-        )
+        # Skip segmenter entirely when using GT masks (no SAM3 needed)
+        if self.use_gt_masks:
+            self.segmenter = None
+        else:
+            self.segmenter = get_sam3_segmenter(
+                use_mock=use_mock_segmenter,
+                use_server=use_server_segmenter,
+                model_name=segmenter_model,
+                presence_threshold=presence_threshold,
+            )
         self.parser = InstructionParser()
 
         # State - masks
@@ -189,6 +208,9 @@ class CGVDWrapper(gym.Wrapper):
         self.current_anchor: Optional[str] = None
         self.episode_count: int = 0
         self.episode_debug_dir: Optional[str] = None
+
+        # Mask coverage (always tracked for verification)
+        self.mask_coverage_pct: float = 0.0  # % of image covered by cached_mask
 
         # Timing instrumentation
         self.last_cgvd_time: float = 0.0
@@ -266,6 +288,53 @@ class CGVDWrapper(gym.Wrapper):
         robot_link_ids = self.env.unwrapped.robot_link_ids
         return np.isin(actor_seg, robot_link_ids).astype(np.float32)
 
+    def _get_gt_distractor_mask(self) -> Optional[np.ndarray]:
+        """Pixel-perfect distractor mask from renderer segmentation."""
+        seg = self._current_segmentation
+        if seg is None:
+            return None
+        actor_seg = seg[..., 1]
+        try:
+            distractor_actor_ids = [obj.id for obj in self.env.distractor_objs]
+        except AttributeError:
+            return None
+        if not distractor_actor_ids:
+            return None
+        return np.isin(actor_seg, distractor_actor_ids).astype(np.float32)
+
+    def _get_gt_safe_mask(self) -> Optional[np.ndarray]:
+        """Pixel-perfect safe-set mask (target + anchor) from renderer segmentation."""
+        seg = self._current_segmentation
+        if seg is None:
+            return None
+        actor_seg = seg[..., 1]
+        base_env = self.env.unwrapped
+        safe_ids = []
+        for attr in ['episode_source_obj', 'episode_target_obj']:
+            obj = getattr(base_env, attr, None)
+            if obj is not None:
+                safe_ids.append(obj.id)
+        if not safe_ids:
+            return None
+        return np.isin(actor_seg, safe_ids).astype(np.float32)
+
+    def _hide_distractors(self):
+        """Hide distractor visual meshes for GT background rendering."""
+        try:
+            for obj in self.env.distractor_objs:
+                for vb in obj.get_visual_bodies():
+                    vb.set_visible(False)
+        except AttributeError:
+            pass
+
+    def _show_distractors(self):
+        """Restore distractor visual meshes."""
+        try:
+            for obj in self.env.distractor_objs:
+                for vb in obj.get_visual_bodies():
+                    vb.set_visible(True)
+        except AttributeError:
+            pass
 
     def _render_robot_free_image(self, camera_name: str) -> np.ndarray:
         """Re-render scene with robot hidden to get unoccluded view for SAM3.
@@ -525,6 +594,9 @@ class CGVDWrapper(gym.Wrapper):
         self.current_target = None
         self.current_anchor = None
 
+        # Reset mask coverage
+        self.mask_coverage_pct = 0.0
+
         # Reset timing accumulators
         self.last_cgvd_time = 0.0
         self.last_sam3_time = 0.0
@@ -663,9 +735,11 @@ class CGVDWrapper(gym.Wrapper):
 
         # During warmup, render robot-free image so SAM3 sees distractors
         # unoccluded by the robot arm.  Reused for safe-set query below.
-        if in_warmup:
+        # With GT masks we don't need robot-free for SAM3, but LaMa still
+        # needs it as inpainting source (unless GT background is also set).
+        if in_warmup and not (self.use_gt_masks and self.use_gt_background):
             safe_query_image = self._render_robot_free_image(camera_name)
-            self._log("[CGVD] Using robot-free image for distractor and safe-set queries")
+            self._log("[CGVD] Using robot-free image for warmup queries")
         else:
             safe_query_image = image
         should_recompute = (
@@ -674,15 +748,24 @@ class CGVDWrapper(gym.Wrapper):
             (not self.cache_distractor_once and self.frame_count % self.update_freq == 0)
         )
         if should_recompute:
-            raw_distractor_mask = self.segmenter.segment(
-                safe_query_image, distractor_concepts, presence_threshold=self.distractor_presence_threshold
-            )
-            self.distractor_scores = self.segmenter.last_scores.copy()
-            self.distractor_individual_masks = self.segmenter.last_individual_masks.copy()
+            if self.use_gt_masks:
+                raw_distractor_mask = self._get_gt_distractor_mask()
+                if raw_distractor_mask is None:
+                    raw_distractor_mask = np.zeros_like(image[:, :, 0], dtype=np.float32)
+                self.distractor_scores = {"gt_distractor": 1.0}
+                self.distractor_individual_masks = {"gt_distractor": raw_distractor_mask}
+                self._log(f"[CGVD] Frame {self.frame_count} GT distractor mask: "
+                          f"{raw_distractor_mask.sum() / raw_distractor_mask.size * 100:.1f}%")
+            else:
+                raw_distractor_mask = self.segmenter.segment(
+                    safe_query_image, distractor_concepts, presence_threshold=self.distractor_presence_threshold
+                )
+                self.distractor_scores = self.segmenter.last_scores.copy()
+                self.distractor_individual_masks = self.segmenter.last_individual_masks.copy()
 
-            # Log distractor scores
-            scores_str = ", ".join(f"{k}={v:.3f}" for k, v in self.distractor_scores.items())
-            self._log(f"[CGVD] Frame {self.frame_count} Distractor scores: {scores_str}")
+                # Log distractor scores
+                scores_str = ", ".join(f"{k}={v:.3f}" for k, v in self.distractor_scores.items())
+                self._log(f"[CGVD] Frame {self.frame_count} Distractor scores: {scores_str}")
 
             if self.cached_distractor_mask is None:
                 # First frame: initialize
@@ -697,7 +780,8 @@ class CGVDWrapper(gym.Wrapper):
             if self.verbose:
                 cov = self.cached_distractor_mask.sum() / self.cached_distractor_mask.size * 100
                 status = "accumulating" if in_warmup else "frozen"
-                print(f"[CGVD] Distractor mask: {cov:.1f}% (frame {self.frame_count}, {status})")
+                src = "GT" if self.use_gt_masks else "SAM3"
+                print(f"[CGVD] Distractor mask ({src}): {cov:.1f}% (frame {self.frame_count}, {status})")
 
         distractor_mask = self.cached_distractor_mask
 
@@ -714,64 +798,77 @@ class CGVDWrapper(gym.Wrapper):
             # Step 3a: Target + anchor mask - accumulate during warm-up period
             in_warmup = self.frame_count < self.safeset_warmup_frames
             if self.cached_safe_mask is None or in_warmup:
-                safe_concepts = self.parser.build_concept_prompt(
-                    self.current_target,
-                    self.current_anchor,
-                    include_robot=False,  # Robot tracked separately
-                )
+                if self.use_gt_masks:
+                    raw_target_mask = self._get_gt_safe_mask()
+                    if raw_target_mask is None:
+                        raw_target_mask = np.zeros_like(image[:, :, 0], dtype=np.float32)
+                    self.safe_scores = {"gt_safe": 1.0}
+                    self.safe_individual_masks = {"gt_safe": raw_target_mask}
+                    # GT masks are pixel-perfect; skip cross-val and per-concept accumulation
+                    self.cached_target_mask = raw_target_mask
+                    self.cached_safe_mask = raw_target_mask
+                    self._log(f"[CGVD] Frame {self.frame_count} GT safe-set mask: "
+                              f"{raw_target_mask.sum() / raw_target_mask.size * 100:.1f}%")
+                else:
+                    safe_concepts = self.parser.build_concept_prompt(
+                        self.current_target,
+                        self.current_anchor,
+                        include_robot=False,  # Robot tracked separately
+                    )
 
-                # safe_query_image was set earlier: robot-free during warmup,
-                # raw observation otherwise.
+                    # safe_query_image was set earlier: robot-free during warmup,
+                    # raw observation otherwise.
 
-                raw_target_mask = self.segmenter.segment(
-                    safe_query_image, safe_concepts, presence_threshold=self.presence_threshold
-                )
-                self.safe_scores = self.segmenter.last_scores.copy()
-                self.safe_individual_masks = self.segmenter.last_individual_masks.copy()
+                    raw_target_mask = self.segmenter.segment(
+                        safe_query_image, safe_concepts, presence_threshold=self.presence_threshold
+                    )
+                    self.safe_scores = self.segmenter.last_scores.copy()
+                    self.safe_individual_masks = self.segmenter.last_individual_masks.copy()
 
-                # Cross-validate: compute genuineness scores (no removal).
-                # Scores are stored for Layer 3 connected-component scoring.
-                genuineness_scores = self._cross_validate_safeset(
-                    self.safe_individual_masks, self.safe_scores,
-                    self.distractor_individual_masks, self.distractor_scores,
-                )
-                self._instance_genuineness.update(genuineness_scores)
+                    # Cross-validate: compute genuineness scores (no removal).
+                    # Scores are stored for Layer 3 connected-component scoring.
+                    genuineness_scores = self._cross_validate_safeset(
+                        self.safe_individual_masks, self.safe_scores,
+                        self.distractor_individual_masks, self.distractor_scores,
+                    )
+                    self._instance_genuineness.update(genuineness_scores)
 
-                scores_str = ", ".join(f"{k}={v:.3f}" for k, v in self.safe_scores.items())
-                self._log(f"[CGVD] Frame {self.frame_count} Safe-set scores: {scores_str}")
+                    scores_str = ", ".join(f"{k}={v:.3f}" for k, v in self.safe_scores.items())
+                    self._log(f"[CGVD] Frame {self.frame_count} Safe-set scores: {scores_str}")
 
-                # Split by concept and accumulate ALL instances per-concept
-                for name, mask in self.safe_individual_masks.items():
-                    base = name.rsplit('_', 1)[0] if '_' in name and name.rsplit('_', 1)[1].isdigit() else name
-                    if base == self.current_target:
-                        self._accumulate_target(mask)
-                    else:
-                        # Anchor: accumulate unconditionally (never filtered)
-                        if self.cached_anchor_mask is None:
-                            self.cached_anchor_mask = mask.copy()
-                            self._anchor_votes = (mask > 0.5).astype(np.float32)
+                    # Split by concept and accumulate ALL instances per-concept
+                    for name, mask in self.safe_individual_masks.items():
+                        base = name.rsplit('_', 1)[0] if '_' in name and name.rsplit('_', 1)[1].isdigit() else name
+                        if base == self.current_target:
+                            self._accumulate_target(mask)
                         else:
-                            self.cached_anchor_mask = np.maximum(self.cached_anchor_mask, mask)
-                            self._anchor_votes += (mask > 0.5).astype(np.float32)
+                            # Anchor: accumulate unconditionally (never filtered)
+                            if self.cached_anchor_mask is None:
+                                self.cached_anchor_mask = mask.copy()
+                                self._anchor_votes = (mask > 0.5).astype(np.float32)
+                            else:
+                                self.cached_anchor_mask = np.maximum(self.cached_anchor_mask, mask)
+                                self._anchor_votes += (mask > 0.5).astype(np.float32)
 
-                # Recompute combined safe mask from per-concept masks
-                self._recompute_cached_safe_mask(raw_target_mask.shape)
-
-                # On last warmup frame: run Layer 3 cleanup and log stats
-                is_last_warmup = in_warmup and (self.frame_count == self.safeset_warmup_frames - 1)
-                if is_last_warmup:
-                    if self._target_votes is not None:
-                        union_pixels = int((self.cached_target_mask > 0.5).sum()) if self.cached_target_mask is not None else 0
-                        max_votes = int(self._target_votes.max())
-                        self._log(f"[CGVD] Target mask before cleanup: {union_pixels} pixels "
-                                  f"(union of {self.safeset_warmup_frames} frames, max_votes={max_votes})")
-                    self._cleanup_target_mask()
+                    # Recompute combined safe mask from per-concept masks
                     self._recompute_cached_safe_mask(raw_target_mask.shape)
+
+                    # On last warmup frame: run Layer 3 cleanup and log stats
+                    is_last_warmup = in_warmup and (self.frame_count == self.safeset_warmup_frames - 1)
+                    if is_last_warmup:
+                        if self._target_votes is not None:
+                            union_pixels = int((self.cached_target_mask > 0.5).sum()) if self.cached_target_mask is not None else 0
+                            max_votes = int(self._target_votes.max())
+                            self._log(f"[CGVD] Target mask before cleanup: {union_pixels} pixels "
+                                      f"(union of {self.safeset_warmup_frames} frames, max_votes={max_votes})")
+                        self._cleanup_target_mask()
+                        self._recompute_cached_safe_mask(raw_target_mask.shape)
 
                 if self.verbose:
                     cov = self.cached_safe_mask.sum() / self.cached_safe_mask.size * 100 if self.cached_safe_mask is not None else 0
                     status = "accumulating" if in_warmup else "frozen"
-                    print(f"[CGVD] Safe-set mask: {cov:.1f}% (frame {self.frame_count}, {status})")
+                    src = "GT" if self.use_gt_masks else "SAM3"
+                    print(f"[CGVD] Safe-set mask ({src}): {cov:.1f}% (frame {self.frame_count}, {status})")
 
             # Step 3b: Robot mask - tracked every frame
             # Pixel-perfect mask from renderer segmentation (no SAM3)
@@ -836,13 +933,15 @@ class CGVDWrapper(gym.Wrapper):
             undilated_distractor > 0.5, safe_mask_for_gating < 0.5
         ).astype(np.float32)
 
+        # Always track mask coverage (for verification / analysis)
+        self.mask_coverage_pct = float(self.cached_mask.sum() / self.cached_mask.size * 100)
+
         seg_time = time.time() - seg_start
         if self.verbose:
             d_cov = distractor_mask.sum() / distractor_mask.size * 100
             s_cov = safe_mask.sum() / safe_mask.size * 100
-            f_cov = self.cached_mask.sum() / self.cached_mask.size * 100
             print(
-                f"[CGVD] Distractor: {d_cov:.1f}%, Safe: {s_cov:.1f}%, Final: {f_cov:.1f}%, seg_time={seg_time:.3f}s"
+                f"[CGVD] Distractor: {d_cov:.1f}%, Safe: {s_cov:.1f}%, Final: {self.mask_coverage_pct:.1f}%, seg_time={seg_time:.3f}s"
             )
 
         self.frame_count += 1
@@ -851,30 +950,48 @@ class CGVDWrapper(gym.Wrapper):
         # The VLA never sees warmup frames — they are consumed internally by
         # reset() which steps the env with no-op actions.
         if self.frame_count <= self.safeset_warmup_frames:
-            # Last warmup frame: inpaint robot-free render to create clean plate.
-            # _hide_robot() uses set_visible(False) which preserves segmentation
-            # actor IDs, so the overlay texture matches the live frame exactly.
+            # Last warmup frame: create clean plate (background without distractors/robot).
             if (self.frame_count == self.safeset_warmup_frames and
-                    self.cached_inpainted_image is None and
-                    self.inpainter is not None):
-                inpaint_mask = self._build_inpaint_mask()
-                self.cached_inpainted_image = self.inpainter.inpaint(
-                    safe_query_image, inpaint_mask, dilate_mask=0
-                )
-                self.last_lama_time = self.inpainter.last_inpaint_time
-                self.total_lama_time += self.last_lama_time
-                self._log(f"[CGVD] Clean plate from robot-free warmup render "
-                          f"(mask coverage={inpaint_mask.sum() / inpaint_mask.size * 100:.1f}%)")
-                # Save diagnostic images
-                if self.save_debug_images and self.episode_debug_dir:
-                    diag_dir = os.path.join(self.episode_debug_dir, "lama_diag")
-                    os.makedirs(diag_dir, exist_ok=True)
-                    cv2.imwrite(os.path.join(diag_dir, "source.png"),
-                                cv2.cvtColor(safe_query_image, cv2.COLOR_RGB2BGR))
-                    cv2.imwrite(os.path.join(diag_dir, "mask.png"),
-                                (inpaint_mask * 255).astype(np.uint8))
-                    cv2.imwrite(os.path.join(diag_dir, "inpainted.png"),
-                                cv2.cvtColor(self.cached_inpainted_image, cv2.COLOR_RGB2BGR))
+                    self.cached_inpainted_image is None):
+                if self.use_gt_background:
+                    # GT background: hide distractors + robot, render clean scene
+                    self._hide_distractors()
+                    self._hide_robot()
+                    try:
+                        obs_clean = self.env.unwrapped.get_obs()
+                        color = obs_clean['image'][camera_name]['Color']
+                        self.cached_inpainted_image = (np.clip(color[..., :3], 0, 1) * 255).astype(np.uint8)
+                    finally:
+                        self._show_distractors()
+                        self._show_robot()
+                        self.env.unwrapped._scene.update_render()
+                    self._log("[CGVD] Clean plate from GT sim render (no distractors, no robot)")
+                    # Save diagnostic images
+                    if self.save_debug_images and self.episode_debug_dir:
+                        diag_dir = os.path.join(self.episode_debug_dir, "lama_diag")
+                        os.makedirs(diag_dir, exist_ok=True)
+                        cv2.imwrite(os.path.join(diag_dir, "gt_background.png"),
+                                    cv2.cvtColor(self.cached_inpainted_image, cv2.COLOR_RGB2BGR))
+                elif self.inpainter is not None:
+                    # LaMa inpainting path (original)
+                    inpaint_mask = self._build_inpaint_mask()
+                    self.cached_inpainted_image = self.inpainter.inpaint(
+                        safe_query_image, inpaint_mask, dilate_mask=0
+                    )
+                    self.last_lama_time = self.inpainter.last_inpaint_time
+                    self.total_lama_time += self.last_lama_time
+                    self._log(f"[CGVD] Clean plate from robot-free warmup render "
+                              f"(mask coverage={inpaint_mask.sum() / inpaint_mask.size * 100:.1f}%)")
+                    # Save diagnostic images
+                    if self.save_debug_images and self.episode_debug_dir:
+                        diag_dir = os.path.join(self.episode_debug_dir, "lama_diag")
+                        os.makedirs(diag_dir, exist_ok=True)
+                        cv2.imwrite(os.path.join(diag_dir, "source.png"),
+                                    cv2.cvtColor(safe_query_image, cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(os.path.join(diag_dir, "mask.png"),
+                                    (inpaint_mask * 255).astype(np.uint8))
+                        cv2.imwrite(os.path.join(diag_dir, "inpainted.png"),
+                                    cv2.cvtColor(self.cached_inpainted_image, cv2.COLOR_RGB2BGR))
 
             if self.save_debug_images:
                 self._save_debug_images(image, self.cached_mask, safe_query_image,
@@ -883,14 +1000,25 @@ class CGVDWrapper(gym.Wrapper):
             self.total_cgvd_time += self.last_cgvd_time
             return obs
 
+        # Passthrough mode: pipeline ran (masks computed, background generated) but
+        # VLA sees the original unmodified image. Tests env state corruption from
+        # robot hide/show and scene re-renders.
+        if self.disable_compositing:
+            if self.save_debug_images:
+                self._save_debug_images(image, self.cached_mask, image)
+            self.last_cgvd_time = time.time() - cgvd_start
+            self.total_cgvd_time += self.last_cgvd_time
+            return obs
+
         # Apply visual distillation to remove distractors
-        if self.disable_inpaint:
+        if self.disable_inpaint and not self.use_gt_background:
             # Ablation: Mean-color fill instead of inpainting
             distilled = self._apply_mean_fill(image, self.cached_mask)
         else:
             # Periodic refresh of cached background (disabled by default)
             if (self.cache_refresh_interval > 0 and
-                    self.frame_count % self.cache_refresh_interval == 0):
+                    self.frame_count % self.cache_refresh_interval == 0 and
+                    self.inpainter is not None):
                 cache_mask = self.cached_mask.copy()
                 self.cached_inpainted_image = self.inpainter.inpaint(image, cache_mask, dilate_mask=0)
                 if self.verbose:
@@ -916,8 +1044,9 @@ class CGVDWrapper(gym.Wrapper):
         self.total_cgvd_time += self.last_cgvd_time
 
         # Get component timing from segmenter and inpainter
-        self.last_sam3_time = self.segmenter.last_segment_time
-        self.total_sam3_time += self.last_sam3_time
+        if self.segmenter is not None:
+            self.last_sam3_time = self.segmenter.last_segment_time
+            self.total_sam3_time += self.last_sam3_time
         if self.inpainter is not None:
             self.last_lama_time = self.inpainter.last_inpaint_time
             self.total_lama_time += self.last_lama_time
@@ -1164,6 +1293,9 @@ class CGVDWrapper(gym.Wrapper):
                     cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
                 )
                 cv2.drawContours(panel4, contours, -1, (255, 0, 0), 1)
+            # Mask coverage annotation
+            cv2.putText(panel4, f"mask: {self.mask_coverage_pct:.1f}%",
+                        (5, h - 8), font, 0.35, (255, 200, 0), 1)
 
             # ── Assemble ──
             comparison = np.hstack([panel1, panel2, panel3, panel4])
@@ -1282,6 +1414,7 @@ class CGVDWrapper(gym.Wrapper):
             "initialized": True,
             "frame_count": self.frame_count,
             "mask_coverage": float(self.cached_mask.sum() / self.cached_mask.size),
+            "mask_coverage_pct": self.mask_coverage_pct,
             "mask_shape": self.cached_mask.shape,
             "current_target": self.current_target,
             "current_anchor": self.current_anchor,

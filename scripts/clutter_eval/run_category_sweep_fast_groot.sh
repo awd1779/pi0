@@ -78,6 +78,11 @@ SOURCE_OBJ=""
 # Overlay variant aggregation
 OVERLAY_VARIANTS="off"
 
+# GT ablation flags
+USE_GT_MASKS=""
+USE_GT_BACKGROUND=""
+PASSTHROUGH=""
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -168,6 +173,18 @@ while [[ $# -gt 0 ]]; do
         --overlay_variants)
             OVERLAY_VARIANTS="$2"
             shift 2
+            ;;
+        --use_gt_masks)
+            USE_GT_MASKS="--use_gt_masks"
+            shift
+            ;;
+        --use_gt_background)
+            USE_GT_BACKGROUND="--use_gt_background"
+            shift
+            ;;
+        --passthrough)
+            PASSTHROUGH="--passthrough"
+            shift
             ;;
         *)
             echo "Unknown option: $1"
@@ -263,7 +280,8 @@ CMD="xvfb-run -a -s \"-screen 0 1024x768x24\" $PYTHON_CMD scripts/clutter_eval/b
     --cgvd_safe_threshold $CGVD_SAFE_THRESHOLD \
     --cgvd_robot_threshold $CGVD_ROBOT_THRESHOLD \
     --cgvd_distractor_threshold $CGVD_DISTRACTOR_THRESHOLD \
-    $DRY_RUN $RECORDING $CGVD_DEBUG $CGVD_VERBOSE $FRAME_COMPARISON $RANDOMIZE_DISTRACTORS"
+    $DRY_RUN $RECORDING $CGVD_DEBUG $CGVD_VERBOSE $FRAME_COMPARISON $RANDOMIZE_DISTRACTORS \
+    $USE_GT_MASKS $USE_GT_BACKGROUND $PASSTHROUGH"
 
 # Append optional overrides (only if set)
 if [[ -n "$PROMPT_OVERRIDE" ]]; then

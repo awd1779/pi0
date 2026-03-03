@@ -84,6 +84,7 @@ class EpisodeResult:
     cgvd_time: float = 0.0  # Total CGVD time for episode
     sam3_time: float = 0.0  # Total SAM3 segmentation time
     lama_time: float = 0.0  # Total LaMa inpainting time
+    mask_coverage_pct: float = 0.0  # % of image covered by CGVD mask
 
     @property
     def hard_success(self) -> bool:
@@ -148,6 +149,10 @@ class BatchEvaluator:
         cgvd_robot_threshold: float = 0.3,
         cgvd_distractor_threshold: float = 0.20,
         save_attention: bool = False,
+        disable_inpaint: bool = False,
+        use_gt_masks: bool = False,
+        use_gt_background: bool = False,
+        passthrough: bool = False,
     ):
         """Initialize batch evaluator with shared model.
 
@@ -163,6 +168,10 @@ class BatchEvaluator:
             cgvd_robot_threshold: Threshold for robot arm detection
             cgvd_distractor_threshold: Threshold for distractor detection
             save_attention: Save attention map visualizations for each episode
+            disable_inpaint: Ablation flag - use mean-color fill instead of LaMa
+            use_gt_masks: Ablation flag - use GT segmentation masks instead of SAM3
+            use_gt_background: Ablation flag - use sim render instead of LaMa
+            passthrough: Ablation flag - run CGVD pipeline but return original image
         """
         self.checkpoint_path = checkpoint_path
         self.device = torch.device(f"cuda:{device}")
@@ -175,6 +184,10 @@ class BatchEvaluator:
         self.cgvd_robot_threshold = cgvd_robot_threshold
         self.cgvd_distractor_threshold = cgvd_distractor_threshold
         self.save_attention = save_attention
+        self.disable_inpaint = disable_inpaint
+        self.use_gt_masks = use_gt_masks
+        self.use_gt_background = use_gt_background
+        self.passthrough = passthrough
         self.cgvd_target_override = None
         self.cgvd_anchor_override = None
         self.prompt_override = None
@@ -283,6 +296,10 @@ class BatchEvaluator:
                 distractor_presence_threshold=self.cgvd_distractor_threshold,
                 target_override=self.cgvd_target_override,
                 anchor_override=self.cgvd_anchor_override,
+                disable_inpaint=self.disable_inpaint,
+                use_gt_masks=self.use_gt_masks,
+                use_gt_background=self.use_gt_background,
+                disable_compositing=self.passthrough,
             )
 
         return env
@@ -440,10 +457,11 @@ class BatchEvaluator:
         # Get grasp failure classification
         failure_mode = grasp_analyzer.classify_failure(success, obs)
 
-        # Get CGVD timing stats (only for CGVD mode)
+        # Get CGVD timing and mask stats (only for CGVD mode)
         cgvd_time = 0.0
         sam3_time = 0.0
         lama_time = 0.0
+        mask_coverage_pct = 0.0
         if use_cgvd:
             # Try to get timing from CGVDWrapper
             cgvd_wrapper = self._get_cgvd_wrapper(env)
@@ -452,6 +470,7 @@ class BatchEvaluator:
                 cgvd_time = timing_stats.get("total_cgvd_time", 0.0)
                 sam3_time = timing_stats.get("total_sam3_time", 0.0)
                 lama_time = timing_stats.get("total_lama_time", 0.0)
+                mask_coverage_pct = cgvd_wrapper.mask_coverage_pct
 
         return EpisodeResult(
             success=success,
@@ -465,6 +484,7 @@ class BatchEvaluator:
             cgvd_time=cgvd_time,
             sam3_time=sam3_time,
             lama_time=lama_time,
+            mask_coverage_pct=mask_coverage_pct,
         )
 
     def _get_cgvd_wrapper(self, env):
@@ -593,10 +613,11 @@ class BatchEvaluator:
                 parts.append(placed)
             if names:
                 parts.append(f"[{names}]")
+            parts.append(f"mask={result.mask_coverage_pct:.1f}%")
             parts.append(f"{result.episode_time:.0f}s")
             parts.append(status)
             print("  ".join(parts))
-            log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode}, cgvd={result.cgvd_time:.2f}s)"
+            log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode}, cgvd={result.cgvd_time:.2f}s, mask={result.mask_coverage_pct:.1f}%)"
             cgvd_log_lines.append(log_line)
         env.close()
         c_ok = sum(1 for r in cgvd_results if r.success)
@@ -872,7 +893,18 @@ class BatchEvaluator:
                 f.write(f"| {mode} | {baseline_modes[mode]} | {cgvd_modes[mode]} |\n")
             f.write("\n")
 
-            # New metrics: CGVD Latency
+            # Mask Coverage Analysis
+            mask_coverages = [e.mask_coverage_pct for r in results for e in r.cgvd_results if e.mask_coverage_pct > 0]
+            if mask_coverages:
+                f.write("## Mask Coverage Analysis\n\n")
+                f.write(f"**Mean mask coverage: {np.mean(mask_coverages):.1f}%** "
+                        f"(std={np.std(mask_coverages):.1f}%, "
+                        f"min={min(mask_coverages):.1f}%, "
+                        f"max={max(mask_coverages):.1f}%)\n\n")
+                f.write("Higher mask coverage = more uniform compositing (less chimeric). "
+                        "Partial coverage (20-40%) creates OOD artifacts.\n\n")
+
+            # CGVD Latency
             cgvd_times = [e.cgvd_time for r in results for e in r.cgvd_results if e.cgvd_time > 0]
             sam3_times = [e.sam3_time for r in results for e in r.cgvd_results if e.sam3_time > 0]
             lama_times = [e.lama_time for r in results for e in r.cgvd_results if e.lama_time > 0]
@@ -907,29 +939,30 @@ class BatchEvaluator:
             f.write("run,seed,episode,episode_id,baseline_success,cgvd_success,"
                     "baseline_hard_success,cgvd_hard_success,baseline_time,cgvd_time,"
                     "baseline_collisions,cgvd_collisions,baseline_failure_mode,cgvd_failure_mode,"
-                    "cgvd_pipeline_time,sam3_time,lama_time\n")
+                    "cgvd_pipeline_time,sam3_time,lama_time,mask_coverage_pct\n")
             for r in results:
                 for i, (b, c) in enumerate(zip(r.baseline_results, r.cgvd_results)):
                     f.write(f"{r.config.run_index},{r.config.seed},{i},{b.episode_id},"
                            f"{int(b.success)},{int(c.success)},"
                            f"{int(b.hard_success)},{int(c.hard_success)},{b.episode_time:.2f},{c.episode_time:.2f},"
                            f"{b.collision_count},{c.collision_count},{b.failure_mode},{c.failure_mode},"
-                           f"{c.cgvd_time:.3f},{c.sam3_time:.3f},{c.lama_time:.3f}\n")
+                           f"{c.cgvd_time:.3f},{c.sam3_time:.3f},{c.lama_time:.3f},{c.mask_coverage_pct:.1f}\n")
 
         # Save summary.csv (per-run) with new metrics
         summary_path = os.path.join(output_dir, "summary.csv")
         with open(summary_path, "w", encoding="utf-8") as f:
             f.write("run,seed,baseline_success_rate,cgvd_success_rate,improvement,"
                     "baseline_hard_success_rate,cgvd_hard_success_rate,hard_improvement,"
-                    "baseline_collision_rate,cgvd_collision_rate,avg_cgvd_time\n")
+                    "baseline_collision_rate,cgvd_collision_rate,avg_cgvd_time,avg_mask_coverage_pct\n")
             for r in results:
                 baseline_collision_rate = sum(1 for e in r.baseline_results if e.collision_count > 0) / max(1, len(r.baseline_results)) * 100
                 cgvd_collision_rate = sum(1 for e in r.cgvd_results if e.collision_count > 0) / max(1, len(r.cgvd_results)) * 100
                 avg_cgvd_time = np.mean([e.cgvd_time for e in r.cgvd_results if e.cgvd_time > 0]) if any(e.cgvd_time > 0 for e in r.cgvd_results) else 0.0
+                avg_mask_cov = np.mean([e.mask_coverage_pct for e in r.cgvd_results if e.mask_coverage_pct > 0]) if any(e.mask_coverage_pct > 0 for e in r.cgvd_results) else 0.0
                 f.write(f"{r.config.run_index},{r.config.seed},{r.baseline_rate:.1f},"
                        f"{r.cgvd_rate:.1f},{r.improvement:.1f},"
                        f"{r.baseline_hard_success_rate:.1f},{r.cgvd_hard_success_rate:.1f},{r.hard_improvement:.1f},"
-                       f"{baseline_collision_rate:.1f},{cgvd_collision_rate:.1f},{avg_cgvd_time:.3f}\n")
+                       f"{baseline_collision_rate:.1f},{cgvd_collision_rate:.1f},{avg_cgvd_time:.3f},{avg_mask_cov:.1f}\n")
 
     def run_sweep(
         self,
@@ -1125,7 +1158,8 @@ def save_sweep_results(results: List[ConfigResult], output_dir: str):
         f.write("task,category,num_distractors,run,seed,baseline_rate,cgvd_rate,improvement,"
                 "baseline_hard_sr,cgvd_hard_sr,hard_improvement,"
                 "baseline_collisions,cgvd_collisions,baseline_never_reached,baseline_missed_grasp,baseline_dropped,"
-                "cgvd_never_reached,cgvd_missed_grasp,cgvd_dropped,avg_cgvd_time,avg_sam3_time,avg_lama_time\n")
+                "cgvd_never_reached,cgvd_missed_grasp,cgvd_dropped,avg_cgvd_time,avg_sam3_time,avg_lama_time,"
+                "avg_mask_coverage_pct\n")
         for r in results:
             # Calculate collision rates
             baseline_collisions = sum(1 for e in r.baseline_results if e.collision_count > 0)
@@ -1139,13 +1173,15 @@ def save_sweep_results(results: List[ConfigResult], output_dir: str):
             cgvd_missed_grasp = sum(1 for e in r.cgvd_results if e.failure_mode == "missed_grasp")
             cgvd_dropped = sum(1 for e in r.cgvd_results if e.failure_mode == "dropped")
 
-            # Calculate average CGVD timing
+            # Calculate average CGVD timing and mask coverage
             cgvd_times = [e.cgvd_time for e in r.cgvd_results if e.cgvd_time > 0]
             sam3_times = [e.sam3_time for e in r.cgvd_results if e.sam3_time > 0]
             lama_times = [e.lama_time for e in r.cgvd_results if e.lama_time > 0]
+            mask_coverages = [e.mask_coverage_pct for e in r.cgvd_results if e.mask_coverage_pct > 0]
             avg_cgvd = np.mean(cgvd_times) if cgvd_times else 0.0
             avg_sam3 = np.mean(sam3_times) if sam3_times else 0.0
             avg_lama = np.mean(lama_times) if lama_times else 0.0
+            avg_mask_cov = np.mean(mask_coverages) if mask_coverages else 0.0
 
             f.write(f"{r.config.task},{r.config.category},{r.config.num_distractors},"
                    f"{r.config.run_index},{r.config.seed},"
@@ -1154,7 +1190,7 @@ def save_sweep_results(results: List[ConfigResult], output_dir: str):
                    f"{baseline_collisions},{cgvd_collisions},"
                    f"{baseline_never_reached},{baseline_missed_grasp},{baseline_dropped},"
                    f"{cgvd_never_reached},{cgvd_missed_grasp},{cgvd_dropped},"
-                   f"{avg_cgvd:.3f},{avg_sam3:.3f},{avg_lama:.3f}\n")
+                   f"{avg_cgvd:.3f},{avg_sam3:.3f},{avg_lama:.3f},{avg_mask_cov:.1f}\n")
 
     # Detailed JSON with new metrics
     json_path = os.path.join(output_dir, f"sweep_results_{prefix}.json")
@@ -1207,6 +1243,7 @@ def save_sweep_results(results: List[ConfigResult], output_dir: str):
                 "avg_cgvd_time": np.mean([e.cgvd_time for e in r.cgvd_results if e.cgvd_time > 0]) if any(e.cgvd_time > 0 for e in r.cgvd_results) else 0.0,
                 "avg_sam3_time": np.mean([e.sam3_time for e in r.cgvd_results if e.sam3_time > 0]) if any(e.sam3_time > 0 for e in r.cgvd_results) else 0.0,
                 "avg_lama_time": np.mean([e.lama_time for e in r.cgvd_results if e.lama_time > 0]) if any(e.lama_time > 0 for e in r.cgvd_results) else 0.0,
+                "avg_mask_coverage_pct": float(np.mean([e.mask_coverage_pct for e in r.cgvd_results if e.mask_coverage_pct > 0])) if any(e.mask_coverage_pct > 0 for e in r.cgvd_results) else 0.0,
                 "episodes": [{
                     "success": e.success,
                     "hard_success": e.hard_success,
@@ -1217,6 +1254,7 @@ def save_sweep_results(results: List[ConfigResult], output_dir: str):
                     "cgvd_time": e.cgvd_time,
                     "sam3_time": e.sam3_time,
                     "lama_time": e.lama_time,
+                    "mask_coverage_pct": e.mask_coverage_pct,
                 } for e in r.cgvd_results]
             },
             "improvement": r.improvement,
@@ -1241,8 +1279,8 @@ def print_sweep_summary(results: List[ConfigResult]):
         key = (r.config.category, r.config.num_distractors)
         grouped[key].append(r)
 
-    print(f"{'Category':<12} {'Dist':<6} {'Runs':<6} {'Baseline':<12} {'CGVD':<12} {'Delta':<8}")
-    print("-" * 58)
+    print(f"{'Category':<12} {'Dist':<6} {'Runs':<6} {'Baseline':<12} {'CGVD':<12} {'Delta':<8} {'Mask%':<8}")
+    print("-" * 68)
 
     for (category, num_dist), group in sorted(grouped.items()):
         baseline_rates = [r.baseline_rate for r in group]
@@ -1254,12 +1292,17 @@ def print_sweep_summary(results: List[ConfigResult]):
         cgvd_std = np.std(cgvd_rates)
         imp_mean = np.mean([r.improvement for r in group])
 
+        # Average mask coverage across all CGVD episodes in this group
+        mask_covs = [e.mask_coverage_pct for r in group for e in r.cgvd_results if e.mask_coverage_pct > 0]
+        mask_mean = np.mean(mask_covs) if mask_covs else 0.0
+
         print(f"{category:<12} {num_dist:<6} {len(group):<6} "
               f"{baseline_mean:>5.1f}±{baseline_std:<5.1f} "
               f"{cgvd_mean:>5.1f}±{cgvd_std:<5.1f} "
-              f"{imp_mean:>+6.1f}%")
+              f"{imp_mean:>+6.1f}%  "
+              f"{mask_mean:>5.1f}%")
 
-    print("=" * 58)
+    print("=" * 68)
 
 
 def main():
@@ -1300,6 +1343,16 @@ def main():
     # Distractor randomization
     parser.add_argument("--randomize_distractors", action="store_true",
                        help="Randomly sample distractors from pool each episode")
+
+    # CGVD ablations
+    parser.add_argument("--disable_inpaint", action="store_true",
+                       help="Ablation: use mean-color fill instead of LaMa inpainting")
+    parser.add_argument("--use_gt_masks", action="store_true",
+                       help="Ablation: use GT segmentation masks instead of SAM3")
+    parser.add_argument("--use_gt_background", action="store_true",
+                       help="Ablation: use sim render instead of LaMa inpainting")
+    parser.add_argument("--passthrough", action="store_true",
+                       help="Ablation: run CGVD pipeline but return original image")
 
     # CGVD thresholds
     parser.add_argument("--cgvd_safe_threshold", type=float, default=0.3,
@@ -1364,6 +1417,10 @@ def main():
         cgvd_robot_threshold=args.cgvd_robot_threshold,
         cgvd_distractor_threshold=args.cgvd_distractor_threshold,
         save_attention=args.save_attention,
+        disable_inpaint=args.disable_inpaint,
+        use_gt_masks=args.use_gt_masks,
+        use_gt_background=args.use_gt_background,
+        passthrough=args.passthrough,
     )
     evaluator.prompt_override = args.prompt
     evaluator.cgvd_target_override = args.cgvd_target
