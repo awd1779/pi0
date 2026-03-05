@@ -15,6 +15,7 @@ class InstructionParser:
     # Known task patterns for SimplerEnv tasks
     TASK_PATTERNS = [
         # Bridge tasks
+        (r"spoon with.*green.*handle.*towel", ("spoon with green handle", "towel")),
         (r"spoon.*towel", ("spoon", "towel")),
         (r"cucumber.*towel", ("cucumber", "towel")),
         (r"carrot.*plate", ("carrot", "plate")),

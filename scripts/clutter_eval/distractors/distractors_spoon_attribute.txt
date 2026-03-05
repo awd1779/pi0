@@ -1,0 +1,29 @@
+# Attribute distractors: metal/different-looking spoons (same class, different attributes)
+# Target: bridge_spoon_generated_modified (green handle)
+# Tests whether VLA/CGVD can distinguish attribute-level differences
+# Pool size: 24 RoboCasa spoons
+
+rc_spoon_0:0.10
+rc_spoon_1:0.10
+rc_spoon_2:0.10
+rc_spoon_3:0.10
+rc_spoon_4:0.10
+rc_spoon_5:0.10
+rc_spoon_6:0.10
+rc_spoon_7:0.10
+rc_spoon_8:0.10
+rc_spoon_9:0.10
+rc_spoon_10:0.10
+rc_spoon_11:0.10
+rc_spoon_12:0.10
+rc_spoon_13:0.10
+rc_spoon_14:0.10
+rc_spoon_15:0.10
+rc_spoon_16:0.10
+rc_spoon_17:0.10
+rc_spoon_18:0.10
+rc_spoon_19:0.10
+rc_spoon_20:0.10
+rc_spoon_21:0.10
+rc_spoon_22:0.10
+rc_spoon_23:0.10

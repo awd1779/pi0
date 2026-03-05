@@ -203,6 +203,7 @@ class BatchEvaluator:
         self.cgvd_target_override = None
         self.cgvd_anchor_override = None
         self.prompt_override = None
+        self.placement = "spread"
 
         # Set globals for recording
         global _RECORDING_ENABLED, _CGVD_SAVE_DEBUG, _CGVD_VERBOSE
@@ -282,6 +283,7 @@ class BatchEvaluator:
                 external_asset_scale=0.1,
                 num_distractors=num_to_sample,
                 randomize_per_episode=config.randomize_distractors,
+                placement=self.placement,
             )
 
         # Optionally wrap with CGVD
@@ -1410,6 +1412,11 @@ def main():
     parser.add_argument("--source_obj", type=str, default=None,
                        help="Override source object model in sim (e.g. 'bridge_spoon_blue')")
 
+    # Distractor placement strategy
+    parser.add_argument("--placement", type=str, default="spread",
+                       choices=["spread", "near_target"],
+                       help="Distractor placement: spread (maximin, default) or near_target (cluster near source object)")
+
     # Overlay variant aggregation
     parser.add_argument("--overlay_variants", type=str, default="off",
                        choices=["off", "random", "sequential"],
@@ -1467,6 +1474,7 @@ def main():
     evaluator.cgvd_anchor_override = args.cgvd_anchor
     evaluator.source_obj_override = args.source_obj
     evaluator.overlay_variant_mode = args.overlay_variants
+    evaluator.placement = args.placement
 
     if args.act_steps is not None:
         evaluator.cfg.act_steps = args.act_steps

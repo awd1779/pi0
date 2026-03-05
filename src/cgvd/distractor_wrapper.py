@@ -341,7 +341,7 @@ class DistractorWrapper:
         self._log_lines.append(msg)
 
     def __init__(self, env, distractor_ids, distractor_scale=None, external_asset_scale=None,
-                 num_distractors=None, randomize_per_episode=False):
+                 num_distractors=None, randomize_per_episode=False, placement="spread"):
         """Initialize distractor wrapper.
 
         Args:
@@ -358,6 +358,8 @@ class DistractorWrapper:
                             If None or >= len(pool), uses all distractors.
             randomize_per_episode: If True, randomly sample num_distractors from pool each episode.
                             If False, uses all distractors (or first num_distractors if specified).
+            placement: Placement strategy — "spread" (maximin, default) or "near_target"
+                            (minimax, cluster near the source/target object).
         """
         self.env = env
         # Parse distractor_ids for per-object scales (format: "object_id:scale")
@@ -395,6 +397,7 @@ class DistractorWrapper:
         self.distractor_spawn_quats = []  # Final spawn quaternion (lay-flat + random yaw)
         self._distractors_loaded = False
         self._log_lines = []  # Buffered log lines, flushed to file after each reset
+        self.placement = placement
 
     def _load_distractors(self):
         """Load distractor objects into the scene."""
@@ -617,11 +620,17 @@ class DistractorWrapper:
 
         self._log(f"[Distractor] Available cells: {len(available_cells)}/{len(all_cells)}")
 
-        # Maximin assignment: spread distractors across available cells (1 per cell).
-        # Seed with safety bubble centers so distractors also spread away from targets.
+        # Cell assignment strategy
+        near_target = (self.placement == "near_target")
+        strategy_name = "near_target (minimax)" if near_target else "spread (maximin)"
+        self._log(f"[Distractor] Placement strategy: {strategy_name}")
+
         assigned = {}  # obj_idx -> (cx, cy)
         remaining = list(available_cells)
         anchor_positions = [(bx, by) for bx, by, _ in safety_bubbles]
+
+        # For near_target: reference point is first safety bubble (source object)
+        source_pos = anchor_positions[0] if anchor_positions else None
 
         for obj_idx in range(len(self.distractor_objs)):
             if not remaining:
@@ -641,21 +650,46 @@ class DistractorWrapper:
                     self._log(f"[Distractor] OVERFLOW: {self.distractor_objs[obj_idx].name} — hidden off-scene")
                 continue
 
-            # Include safety bubble centers + already-placed distractors
-            all_occupied = anchor_positions + [c for c in assigned.values() if c is not None]
+            if near_target and source_pos is not None:
+                # Near-target: pick closest available cell to source object,
+                # excluding cells already taken by other distractors
+                placed = [c for c in assigned.values() if c is not None]
+                best_d, best = float('inf'), []
+                for i in range(len(remaining)):
+                    cx, cy = remaining[i]
+                    d = np.sqrt((cx - source_pos[0])**2 + (cy - source_pos[1])**2)
+                    # Tiebreak: avoid stacking on already-placed distractors
+                    if placed:
+                        min_peer = min(np.sqrt((cx - px)**2 + (cy - py)**2) for px, py in placed)
+                        if min_peer < CELL_SIZE * 0.9:
+                            continue  # skip cells too close to existing distractors
+                    if d < best_d - 1e-9:
+                        best_d, best = d, [i]
+                    elif abs(d - best_d) < 1e-9:
+                        best.append(i)
+                if not best:
+                    # All remaining cells overlap peers — just pick closest to source
+                    for i in range(len(remaining)):
+                        cx, cy = remaining[i]
+                        d = np.sqrt((cx - source_pos[0])**2 + (cy - source_pos[1])**2)
+                        if d < best_d - 1e-9:
+                            best_d, best = d, [i]
+                        elif abs(d - best_d) < 1e-9:
+                            best.append(i)
+            else:
+                # Spread (maximin): maximize min-distance to all occupied positions
+                all_occupied = anchor_positions + [c for c in assigned.values() if c is not None]
+                best_d, best = -1.0, []
+                for i in range(len(remaining)):
+                    cx, cy = remaining[i]
+                    min_d = min(np.sqrt((cx - px)**2 + (cy - py)**2)
+                               for px, py in all_occupied)
+                    if min_d > best_d + 1e-9:
+                        best_d, best = min_d, [i]
+                    elif abs(min_d - best_d) < 1e-9:
+                        best.append(i)
 
-            # Maximin: maximize min-distance to all occupied positions
-            best_d, best = -1.0, []
-            for i in range(len(remaining)):
-                cx, cy = remaining[i]
-                min_d = min(np.sqrt((cx - px)**2 + (cy - py)**2)
-                           for px, py in all_occupied)
-                if min_d > best_d + 1e-9:
-                    best_d, best = min_d, [i]
-                elif abs(min_d - best_d) < 1e-9:
-                    best.append(i)
             chosen = best[rng.randint(len(best))]
-
             assigned[obj_idx] = remaining.pop(chosen)
 
         # Compute spawn quaternions: base lay-flat + random yaw for visual variety
