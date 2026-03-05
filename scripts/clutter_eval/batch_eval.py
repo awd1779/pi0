@@ -156,6 +156,7 @@ class BatchEvaluator:
         disable_safeset: bool = False,
         disable_crossval: bool = False,
         disable_robot: bool = False,
+        skip_baseline: bool = False,
     ):
         """Initialize batch evaluator with shared model.
 
@@ -178,6 +179,7 @@ class BatchEvaluator:
             disable_safeset: Ablation flag - skip safe-set subtraction
             disable_crossval: Ablation flag - skip cross-validation genuineness scoring
             disable_robot: Ablation flag - disable robot mask handling
+            skip_baseline: Skip baseline evaluation arm (only run CGVD)
         """
         self.checkpoint_path = checkpoint_path
         self.device = torch.device(f"cuda:{device}")
@@ -197,6 +199,7 @@ class BatchEvaluator:
         self.disable_safeset = disable_safeset
         self.disable_crossval = disable_crossval
         self.disable_robot = disable_robot
+        self.skip_baseline = skip_baseline
         self.cgvd_target_override = None
         self.cgvd_anchor_override = None
         self.prompt_override = None
@@ -576,36 +579,39 @@ class BatchEvaluator:
         cgvd_log_lines = []
 
         # Run baseline
-        baseline_output = os.path.join(run_dir, "baseline") if run_dir else None
-        if baseline_output:
-            os.makedirs(baseline_output, exist_ok=True)
+        if self.skip_baseline:
+            print("  Baseline  => SKIPPED (--skip_baseline)")
+        else:
+            baseline_output = os.path.join(run_dir, "baseline") if run_dir else None
+            if baseline_output:
+                os.makedirs(baseline_output, exist_ok=True)
 
-        env = self._create_env(config, use_cgvd=False, output_dir=baseline_output)
-        for ep_idx in range(config.num_episodes):
-            result = self._run_episode(
-                env, ep_idx, config.seed,
-                mode="baseline",
-                output_dir=baseline_output,
-                task=config.task,
-                category=config.category,
-                use_cgvd=False,
-            )
-            baseline_results.append(result)
-            placed, names = self._get_distractor_info(env)
-            status = "SUCCESS" if result.success else "FAIL"
-            parts = [f"  Baseline  ep {ep_idx+1}/{config.num_episodes}"]
-            if placed:
-                parts.append(placed)
-            if names:
-                parts.append(f"[{names}]")
-            parts.append(f"{result.episode_time:.0f}s")
-            parts.append(status)
-            print("  ".join(parts))
-            log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode})"
-            baseline_log_lines.append(log_line)
-        env.close()
-        b_ok = sum(1 for r in baseline_results if r.success)
-        print(f"  Baseline  => {b_ok}/{config.num_episodes} ({b_ok/config.num_episodes*100:.0f}%)")
+            env = self._create_env(config, use_cgvd=False, output_dir=baseline_output)
+            for ep_idx in range(config.num_episodes):
+                result = self._run_episode(
+                    env, ep_idx, config.seed,
+                    mode="baseline",
+                    output_dir=baseline_output,
+                    task=config.task,
+                    category=config.category,
+                    use_cgvd=False,
+                )
+                baseline_results.append(result)
+                placed, names = self._get_distractor_info(env)
+                status = "SUCCESS" if result.success else "FAIL"
+                parts = [f"  Baseline  ep {ep_idx+1}/{config.num_episodes}"]
+                if placed:
+                    parts.append(placed)
+                if names:
+                    parts.append(f"[{names}]")
+                parts.append(f"{result.episode_time:.0f}s")
+                parts.append(status)
+                print("  ".join(parts))
+                log_line = f"Episode {ep_idx+1}: {status} (steps={result.steps}, time={result.episode_time:.2f}s, collisions={result.collision_count}, failure={result.failure_mode})"
+                baseline_log_lines.append(log_line)
+            env.close()
+            b_ok = sum(1 for r in baseline_results if r.success)
+            print(f"  Baseline  => {b_ok}/{config.num_episodes} ({b_ok/config.num_episodes*100:.0f}%)")
 
         # Run CGVD
         cgvd_output = os.path.join(run_dir, "cgvd") if run_dir else None
@@ -1376,6 +1382,8 @@ def main():
                        help="Ablation: skip cross-validation genuineness scoring")
     parser.add_argument("--disable_robot", action="store_true",
                        help="Ablation: disable robot mask handling")
+    parser.add_argument("--skip_baseline", action="store_true",
+                       help="Skip baseline arm (only run CGVD); useful for ablations")
 
     # CGVD thresholds
     parser.add_argument("--cgvd_safe_threshold", type=float, default=0.3,
@@ -1412,8 +1420,9 @@ def main():
     # Generate configurations
     configs = generate_configs(args)
 
-    total_eps = len(configs) * args.episodes * 2
-    print(f"Task: {args.task} | {len(configs)} configs x {args.episodes} eps x 2 = {total_eps} episodes")
+    arms = 1 if args.skip_baseline else 2
+    total_eps = len(configs) * args.episodes * arms
+    print(f"Task: {args.task} | {len(configs)} configs x {args.episodes} eps x {arms} = {total_eps} episodes")
 
     if args.dry_run:
         print("[DRY RUN]")
@@ -1451,6 +1460,7 @@ def main():
         disable_safeset=args.disable_safeset,
         disable_crossval=args.disable_crossval,
         disable_robot=args.disable_robot,
+        skip_baseline=args.skip_baseline,
     )
     evaluator.prompt_override = args.prompt
     evaluator.cgvd_target_override = args.cgvd_target

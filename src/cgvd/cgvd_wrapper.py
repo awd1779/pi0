@@ -868,8 +868,9 @@ class CGVDWrapper(gym.Wrapper):
                             max_votes = int(self._target_votes.max())
                             self._log(f"[CGVD] Target mask before cleanup: {union_pixels} pixels "
                                       f"(union of {self.safeset_warmup_frames} frames, max_votes={max_votes})")
-                        self._cleanup_target_mask()
-                        self._recompute_cached_safe_mask(raw_target_mask.shape)
+                        if not self.disable_crossval:
+                            self._cleanup_target_mask()
+                            self._recompute_cached_safe_mask(raw_target_mask.shape)
 
                 if self.verbose:
                     cov = self.cached_safe_mask.sum() / self.cached_safe_mask.size * 100 if self.cached_safe_mask is not None else 0

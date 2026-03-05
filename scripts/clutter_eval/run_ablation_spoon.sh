@@ -2,8 +2,6 @@
 # CGVD Ablation Study — spoon_on_towel semantic
 #
 # Conditions:
-#   baseline         — No CGVD (reference success rate)
-#   cgvd_full        — Full CGVD pipeline
 #   cgvd_no_crossval — CGVD without cross-validation       (--disable_crossval)
 #   cgvd_no_robot    — CGVD without robot mask handling    (--disable_robot)
 #   cgvd_no_inpaint  — Mean-color fill instead of LaMa     (--disable_inpaint)
@@ -91,15 +89,13 @@ run_condition() {
 # ---------- Condition dispatch ----------
 run_by_name() {
     case "$1" in
-        baseline)         run_condition "baseline" ;;
-        cgvd_full)        run_condition "cgvd_full" ;;
-        cgvd_no_crossval) run_condition "cgvd_no_crossval" "--disable_crossval" ;;
-        cgvd_no_robot)    run_condition "cgvd_no_robot" "--disable_robot" ;;
-        cgvd_no_inpaint)  run_condition "cgvd_no_inpaint" "--disable_inpaint" ;;
+        cgvd_no_crossval) run_condition "cgvd_no_crossval" "--disable_crossval --skip_baseline" ;;
+        cgvd_no_robot)    run_condition "cgvd_no_robot" "--disable_robot --skip_baseline" ;;
+        cgvd_no_inpaint)  run_condition "cgvd_no_inpaint" "--disable_inpaint --skip_baseline" ;;
         *)
             echo "Unknown condition: $1"
             echo ""
-            echo "Valid conditions: all, baseline, cgvd_full, cgvd_no_crossval, cgvd_no_robot, cgvd_no_inpaint"
+            echo "Valid conditions: all, cgvd_no_crossval, cgvd_no_robot, cgvd_no_inpaint"
             exit 1
             ;;
     esac
@@ -124,8 +120,6 @@ START_TIME=$(date +%s)
 
 # ---------- Run ----------
 if [[ "$CONDITION" == "all" ]]; then
-    run_by_name "baseline"
-    run_by_name "cgvd_full"
     run_by_name "cgvd_no_crossval"
     run_by_name "cgvd_no_robot"
     run_by_name "cgvd_no_inpaint"
