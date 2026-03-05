@@ -58,6 +58,7 @@ class CGVDWrapper(gym.Wrapper):
         distractor_iou_threshold: float = 0.15,
         # Ablation parameters
         disable_safeset: bool = False,
+        disable_crossval: bool = False,
         disable_inpaint: bool = False,
         use_gt_masks: bool = False,
         use_gt_background: bool = False,
@@ -95,6 +96,8 @@ class CGVDWrapper(gym.Wrapper):
                                    early frames by allowing the target to be detected when visible.
             disable_safeset: Ablation flag - if True, skip safe-set subtraction (mask distractors
                              directly without protecting target/anchor). Default False.
+            disable_crossval: Ablation flag - if True, skip cross-validation genuineness scoring
+                              in Layer 3 safe-set component selection. Default False.
             disable_inpaint: Ablation flag - if True, use mean-color fill instead of LaMa
                              inpainting. Default False.
             use_inpaint: Legacy parameter (ignored, use disable_inpaint instead).
@@ -130,6 +133,7 @@ class CGVDWrapper(gym.Wrapper):
 
         # Ablation flags
         self.disable_safeset = disable_safeset
+        self.disable_crossval = disable_crossval
         self.disable_inpaint = disable_inpaint
         self.use_gt_masks = use_gt_masks
         self.use_gt_background = use_gt_background
@@ -827,10 +831,13 @@ class CGVDWrapper(gym.Wrapper):
 
                     # Cross-validate: compute genuineness scores (no removal).
                     # Scores are stored for Layer 3 connected-component scoring.
-                    genuineness_scores = self._cross_validate_safeset(
-                        self.safe_individual_masks, self.safe_scores,
-                        self.distractor_individual_masks, self.distractor_scores,
-                    )
+                    if self.disable_crossval:
+                        genuineness_scores = {}
+                    else:
+                        genuineness_scores = self._cross_validate_safeset(
+                            self.safe_individual_masks, self.safe_scores,
+                            self.distractor_individual_masks, self.distractor_scores,
+                        )
                     self._instance_genuineness.update(genuineness_scores)
 
                     scores_str = ", ".join(f"{k}={v:.3f}" for k, v in self.safe_scores.items())

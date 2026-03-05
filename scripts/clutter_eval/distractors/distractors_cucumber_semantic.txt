@@ -6,9 +6,9 @@
 # === ACTIVE POOL (20 distractors) ===
 
 # Corn (3) - elongated like cucumber
-rc_corn_0:0.06
-rc_corn_3:0.06
-rc_corn_4:0.06
+rc_corn_0:0.075
+rc_corn_3:0.075
+rc_corn_4:0.075
 
 # Eggplant (3) - elongated
 rc_eggplant_0:0.06
@@ -19,9 +19,9 @@ rc_eggplant_4:0.06
 rc_carrot_7:0.06
 
 # Squash (3) - elongated
-rc_squash_0:0.06
-rc_squash_5:0.06
-rc_squash_16:0.06
+rc_squash_0:0.075
+rc_squash_5:0.075
+rc_squash_16:0.075
 
 # Bell Pepper (2)
 rc_bell_pepper_0:0.06

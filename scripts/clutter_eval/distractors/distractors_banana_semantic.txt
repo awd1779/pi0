@@ -1,0 +1,37 @@
+# Semantic distractors for banana task (widowx_banana_on_plate)
+# Pool size: 20 (yellow/elongated objects — high confusion with banana)
+# Category: semantic - visually similar food items
+# Scale: 0.07
+
+# === ACTIVE POOL (20 distractors) ===
+
+# Lemon — yellow, oval (3)
+rc_lemon_4:0.07
+ycb_014_lemon:0.6
+
+# Corn — yellow, elongated (4)
+rc_corn_0:0.075
+rc_corn_1:0.075
+rc_corn_3:0.075
+rc_corn_4:0.075
+
+# Cucumber — elongated (6)
+rc_cucumber_0:0.075
+rc_cucumber_1:0.075
+rc_cucumber_2:0.075
+rc_cucumber_3:0.075
+rc_cucumber_4:0.075
+rc_cucumber_5:0.075
+
+# Mango — yellow, oval (1)
+rc_mango_12:0.07
+
+# Tangerine — orange-yellow (1)
+rc_tangerine_2:0.07
+
+# Squash — yellow, elongated (5)
+rc_squash_0:0.075
+rc_squash_1:0.075
+rc_squash_3:0.075
+rc_squash_5:0.075
+rc_squash_7:0.075

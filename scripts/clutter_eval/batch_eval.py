@@ -153,6 +153,9 @@ class BatchEvaluator:
         use_gt_masks: bool = False,
         use_gt_background: bool = False,
         passthrough: bool = False,
+        disable_safeset: bool = False,
+        disable_crossval: bool = False,
+        disable_robot: bool = False,
     ):
         """Initialize batch evaluator with shared model.
 
@@ -172,6 +175,9 @@ class BatchEvaluator:
             use_gt_masks: Ablation flag - use GT segmentation masks instead of SAM3
             use_gt_background: Ablation flag - use sim render instead of LaMa
             passthrough: Ablation flag - run CGVD pipeline but return original image
+            disable_safeset: Ablation flag - skip safe-set subtraction
+            disable_crossval: Ablation flag - skip cross-validation genuineness scoring
+            disable_robot: Ablation flag - disable robot mask handling
         """
         self.checkpoint_path = checkpoint_path
         self.device = torch.device(f"cuda:{device}")
@@ -188,6 +194,9 @@ class BatchEvaluator:
         self.use_gt_masks = use_gt_masks
         self.use_gt_background = use_gt_background
         self.passthrough = passthrough
+        self.disable_safeset = disable_safeset
+        self.disable_crossval = disable_crossval
+        self.disable_robot = disable_robot
         self.cgvd_target_override = None
         self.cgvd_anchor_override = None
         self.prompt_override = None
@@ -286,7 +295,7 @@ class BatchEvaluator:
                 update_freq=1,
                 presence_threshold=self.cgvd_safe_threshold,
                 use_mock_segmenter=False,
-                include_robot=True,
+                include_robot=not self.disable_robot,
                 verbose=self.cgvd_verbose,
                 save_debug_images=self.cgvd_save_debug,
                 debug_dir=debug_dir,
@@ -296,6 +305,8 @@ class BatchEvaluator:
                 distractor_presence_threshold=self.cgvd_distractor_threshold,
                 target_override=self.cgvd_target_override,
                 anchor_override=self.cgvd_anchor_override,
+                disable_safeset=self.disable_safeset,
+                disable_crossval=self.disable_crossval,
                 disable_inpaint=self.disable_inpaint,
                 use_gt_masks=self.use_gt_masks,
                 use_gt_background=self.use_gt_background,
@@ -442,6 +453,12 @@ class BatchEvaluator:
                 result_suffix = "SUCCESS" if success else "FAILED"
                 new_video_path = video_path.replace(".mp4", f"_{result_suffix}.mp4")
                 os.rename(video_path, new_video_path)
+
+        # Rename frames dir with result suffix
+        if frames_dir is not None and os.path.exists(frames_dir):
+            result_suffix = "SUCCESS" if success else "FAILED"
+            new_frames_dir = f"{frames_dir}_{result_suffix}"
+            os.rename(frames_dir, new_frames_dir)
 
         episode_time = time.time() - episode_start
         avg_inference = np.mean(inference_times) if inference_times else 0
@@ -1353,6 +1370,12 @@ def main():
                        help="Ablation: use sim render instead of LaMa inpainting")
     parser.add_argument("--passthrough", action="store_true",
                        help="Ablation: run CGVD pipeline but return original image")
+    parser.add_argument("--disable_safeset", action="store_true",
+                       help="Ablation: skip safe-set subtraction (inpaints target too)")
+    parser.add_argument("--disable_crossval", action="store_true",
+                       help="Ablation: skip cross-validation genuineness scoring")
+    parser.add_argument("--disable_robot", action="store_true",
+                       help="Ablation: disable robot mask handling")
 
     # CGVD thresholds
     parser.add_argument("--cgvd_safe_threshold", type=float, default=0.3,
@@ -1361,6 +1384,10 @@ def main():
                        help="Threshold for robot arm detection (default: 0.3)")
     parser.add_argument("--cgvd_distractor_threshold", type=float, default=0.20,
                        help="Threshold for distractor detection (default: 0.20)")
+
+    # Action steps override
+    parser.add_argument("--act_steps", type=int, default=None,
+                       help="Override action steps per inference (default: use config value, 4 for Bridge)")
 
     # Prompt / concept overrides
     parser.add_argument("--prompt", type=str, default=None,
@@ -1421,12 +1448,19 @@ def main():
         use_gt_masks=args.use_gt_masks,
         use_gt_background=args.use_gt_background,
         passthrough=args.passthrough,
+        disable_safeset=args.disable_safeset,
+        disable_crossval=args.disable_crossval,
+        disable_robot=args.disable_robot,
     )
     evaluator.prompt_override = args.prompt
     evaluator.cgvd_target_override = args.cgvd_target
     evaluator.cgvd_anchor_override = args.cgvd_anchor
     evaluator.source_obj_override = args.source_obj
     evaluator.overlay_variant_mode = args.overlay_variants
+
+    if args.act_steps is not None:
+        evaluator.cfg.act_steps = args.act_steps
+        print(f"Act steps override: {args.act_steps}")
 
     results = list(evaluator.run_sweep(configs, args.output_dir))
 

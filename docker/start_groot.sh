@@ -24,6 +24,10 @@ if [ "$CLONE_OK" = true ]; then
     rsync -a --delete \
         --exclude='checkpoints' \
         --exclude='logs' \
+        --exclude='allenzren_SimplerEnv' \
+        --exclude='Isaac-GR00T' \
+        --exclude='results_logs' \
+        --exclude='*.egg-info' \
         --exclude='__pycache__' \
         --exclude='*.pyc' \
         open-pi-zero-tmp/ open-pi-zero/

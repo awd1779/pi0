@@ -20,6 +20,7 @@
 #   --cgvd_verbose   Print verbose CGVD output
 #   --randomize_distractors  Randomly sample distractors per episode from pool
 #   --save_attention         Save attention map visualizations for each episode
+#   --act_steps              Override action steps per inference (default: config value, 4 for Bridge)
 #   --cgvd_safe_threshold    Safe-set detection threshold (default: 0.3)
 #   --cgvd_robot_threshold   Robot detection threshold (default: 0.3)
 #   --cgvd_distractor_threshold  Distractor detection threshold (default: 0.20)
@@ -60,6 +61,14 @@ SOURCE_OBJ=""
 
 # Overlay variant aggregation
 OVERLAY_VARIANTS="off"
+
+# Action steps override
+ACT_STEPS=""
+
+# Ablation flags
+DISABLE_SAFESET=""
+DISABLE_CROSSVAL=""
+DISABLE_ROBOT=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -144,6 +153,22 @@ while [[ $# -gt 0 ]]; do
             OVERLAY_VARIANTS="$2"
             shift 2
             ;;
+        --act_steps)
+            ACT_STEPS="$2"
+            shift 2
+            ;;
+        --disable_safeset)
+            DISABLE_SAFESET="--disable_safeset"
+            shift
+            ;;
+        --disable_crossval)
+            DISABLE_CROSSVAL="--disable_crossval"
+            shift
+            ;;
+        --disable_robot)
+            DISABLE_ROBOT="--disable_robot"
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
             exit 1
@@ -195,6 +220,9 @@ echo "Distractor counts: $DISTRACTOR_COUNTS"
 echo "Episodes per config: $EPISODES"
 echo "Runs per config: $RUNS"
 echo "Starting seed: $START_SEED"
+if [[ -n "$ACT_STEPS" ]]; then
+    echo "Act steps: $ACT_STEPS (override)"
+fi
 echo "----------------------------------------------"
 echo "Total configurations: $TOTAL_CONFIGS"
 echo "Total episodes: $TOTAL_EPISODES"
@@ -229,7 +257,8 @@ CMD="xvfb-run -a -s \"-screen 0 1024x768x24\" $PYTHON_CMD scripts/clutter_eval/b
     --cgvd_safe_threshold $CGVD_SAFE_THRESHOLD \
     --cgvd_robot_threshold $CGVD_ROBOT_THRESHOLD \
     --cgvd_distractor_threshold $CGVD_DISTRACTOR_THRESHOLD \
-    $DRY_RUN $RECORDING $CGVD_DEBUG $CGVD_VERBOSE $RANDOMIZE_DISTRACTORS $SAVE_ATTENTION"
+    $DRY_RUN $RECORDING $CGVD_DEBUG $CGVD_VERBOSE $RANDOMIZE_DISTRACTORS $SAVE_ATTENTION \
+    $DISABLE_SAFESET $DISABLE_CROSSVAL $DISABLE_ROBOT"
 
 # Append optional overrides (only if set)
 if [[ -n "$PROMPT_OVERRIDE" ]]; then
@@ -246,6 +275,9 @@ if [[ -n "$SOURCE_OBJ" ]]; then
 fi
 if [[ "$OVERLAY_VARIANTS" != "off" ]]; then
     CMD="$CMD --overlay_variants $OVERLAY_VARIANTS"
+fi
+if [[ -n "$ACT_STEPS" ]]; then
+    CMD="$CMD --act_steps $ACT_STEPS"
 fi
 
 echo ""

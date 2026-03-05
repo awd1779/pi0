@@ -530,8 +530,8 @@ class DistractorWrapper:
 
         # Safety bubble parameters
         # Keep padding around task objects so distractors don't block them
-        SAFETY_PADDING = 0.02  # 2cm padding (grid cells provide inherent 3cm buffer + XY-locked settling)
-        FALLBACK_RADIUS = 0.08
+        SAFETY_PADDING = 0.04  # 4cm padding around task objects
+        FALLBACK_RADIUS = 0.10
 
         # Get task object positions for safety bubbles
         safety_bubbles = []  # List of (x, y, radius)
@@ -569,7 +569,7 @@ class DistractorWrapper:
 
         # --- Grid-based placement ---
         # Fixed grid over placement area: one object per cell guarantees no overlap
-        CELL_SIZE = 0.04  # 4cm cells — more grid resolution to avoid overflow with safety bubbles
+        CELL_SIZE = 0.06  # 6cm cells — spreads distractors further apart
         JITTER = 0.01     # Up to 1cm random offset within cell for natural appearance
 
         area_w = X_MAX - X_MIN
@@ -617,54 +617,44 @@ class DistractorWrapper:
 
         self._log(f"[Distractor] Available cells: {len(available_cells)}/{len(all_cells)}")
 
-        # Per-distractor radius-aware maximin assignment
-        # Sort distractors by radius (largest first) so big objects get first
-        # pick of the farthest cells — prevents large objects (plate, eggplant)
-        # from being assigned to cells where their edge overlaps task objects.
-        placement_order = sorted(range(len(self.distractor_objs)),
-                                 key=lambda i: self.distractor_radii[i], reverse=True)
-
-        assigned = {}  # obj_idx -> (cx, cy) or None
+        # Maximin assignment: spread distractors across available cells (1 per cell).
+        # Seed with safety bubble centers so distractors also spread away from targets.
+        assigned = {}  # obj_idx -> (cx, cy)
         remaining = list(available_cells)
+        anchor_positions = [(bx, by) for bx, by, _ in safety_bubbles]
 
-        for obj_idx in placement_order:
-            r = self.distractor_radii[obj_idx]
-
-            # Filter cells safe for this distractor's size:
-            # distance from cell center to bubble center >= bubble_radius + distractor_radius
-            valid = [i for i, (cx, cy) in enumerate(remaining)
-                     if all(np.sqrt((cx - bx)**2 + (cy - by)**2) >= br + r
-                            for bx, by, br in safety_bubbles)]
-
-            if not valid:
-                # Fallback: try any remaining cell (ignore distractor radius,
-                # just keep cell center outside bubble). This allows the
-                # distractor's edge to encroach slightly but keeps its center away.
-                if remaining:
-                    chosen = rng.randint(len(remaining))
-                    assigned[obj_idx] = remaining.pop(chosen)
-                    self._log(f"[Distractor] {self.distractor_objs[obj_idx].name} (r={r:.3f}) — relaxed placement (no radius-safe cell)")
-                    continue
-                # Truly no cells left
-                assigned[obj_idx] = None
+        for obj_idx in range(len(self.distractor_objs)):
+            if not remaining:
+                # All cells used — random fallback that respects safety bubbles
+                found = False
+                for _ in range(50):
+                    x = rng.uniform(X_MIN, X_MAX)
+                    y = rng.uniform(Y_MIN, Y_MAX)
+                    if all(np.sqrt((x - bx)**2 + (y - by)**2) >= bradius
+                           for bx, by, bradius in safety_bubbles):
+                        assigned[obj_idx] = (x, y)
+                        found = True
+                        self._log(f"[Distractor] {self.distractor_objs[obj_idx].name} — random fallback (cells exhausted)")
+                        break
+                if not found:
+                    assigned[obj_idx] = None
+                    self._log(f"[Distractor] OVERFLOW: {self.distractor_objs[obj_idx].name} — hidden off-scene")
                 continue
 
-            prev_cells = [c for c in assigned.values() if c is not None]
-            if not prev_cells:
-                # First distractor: random pick from valid cells
-                chosen = valid[rng.randint(len(valid))]
-            else:
-                # Maximin: maximize min-distance to already-assigned cells
-                best_d, best = -1.0, []
-                for i in valid:
-                    cx, cy = remaining[i]
-                    min_d = min(np.sqrt((cx - px)**2 + (cy - py)**2)
-                               for px, py in prev_cells)
-                    if min_d > best_d + 1e-9:
-                        best_d, best = min_d, [i]
-                    elif abs(min_d - best_d) < 1e-9:
-                        best.append(i)
-                chosen = best[rng.randint(len(best))]
+            # Include safety bubble centers + already-placed distractors
+            all_occupied = anchor_positions + [c for c in assigned.values() if c is not None]
+
+            # Maximin: maximize min-distance to all occupied positions
+            best_d, best = -1.0, []
+            for i in range(len(remaining)):
+                cx, cy = remaining[i]
+                min_d = min(np.sqrt((cx - px)**2 + (cy - py)**2)
+                           for px, py in all_occupied)
+                if min_d > best_d + 1e-9:
+                    best_d, best = min_d, [i]
+                elif abs(min_d - best_d) < 1e-9:
+                    best.append(i)
+            chosen = best[rng.randint(len(best))]
 
             assigned[obj_idx] = remaining.pop(chosen)
 
@@ -682,15 +672,13 @@ class DistractorWrapper:
             z_min, z_max = self.distractor_z_bounds[obj_idx]
             cell = assigned.get(obj_idx)
 
-            if cell is not None:
-                cx, cy = cell
-                x = cx + rng.uniform(-JITTER, JITTER)
-                y = cy + rng.uniform(-JITTER, JITTER)
-            else:
-                # OVERFLOW — no cells left at all; hide off-scene
+            if cell is None:
                 obj.set_pose(sapien.Pose([0, 0, -5], [1, 0, 0, 0]))
-                self._log(f"[Distractor] OVERFLOW: {obj.name} (r={self.distractor_radii[obj_idx]:.3f}) — hidden off-scene")
-                continue  # skip the normal pose-set below
+                continue
+
+            cx, cy = cell
+            x = cx + rng.uniform(-JITTER, JITTER)
+            y = cy + rng.uniform(-JITTER, JITTER)
 
             # Compute spawn height using mesh Z bounds
             if is_sink_task:
