@@ -56,7 +56,7 @@ Every item ID is from `CGVD_REVISION_BRIEF.md`; findings are in the seat reports
 ## Phase 4 — R33 SAM3 robot mask
 | Item | Status | Notes |
 |---|---|---|
-| R33 SAM3-mask substitution + timing | prepared (queued) | Implemented `robot_mask_source="sam3"`: per-frame SAM3 "robot arm" query replaces the renderer mask for the compositing overwrite; per-frame latency printed to cgvd.log. Run = `run_revision_queue2.sh` (n18 semantic, 10 matched seeds, CGVD arm only) — launches after stage 1. FK-projection sentence already added to §III-G in Phase 1. |
+| R33 SAM3-mask substitution + timing | running | Implemented `robot_mask_source="sam3"` (per-frame SAM3 "robot arm" query replaces the renderer mask). Run in progress (`logs/robotmask_sam3_n18`, 10 matched seeds). **Partial measurements already in:** SAM3 robot mask costs **241.3 ± 1.9 ms/frame** (→ per-step ≈575 ms, ≈1.7 Hz) and **fails to detect the robot in ~18% of frames** (falls back to the last known mask) — quantifying both halves of §III-G's "SAM3 can achieve similar protection" claim. SR delta vs the 76.0 replication lands when the run finishes. FK-projection sentence already in §III-G. |
 
 ## Phase 5 — R31 BYOVLA comparator
 | Item | Status | Notes |
