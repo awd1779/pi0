@@ -1,0 +1,6 @@
+baseline_time: mean 9.3, sd 0.4 (n=200)
+cgvd_time: mean 10.8, sd 0.3 (n=200)
+cgvd_pipeline_time: mean 1.7, sd 0.0 (n=200)
+sam3_time: mean 15.9, sd 0.1 (n=200)
+lama_time: mean 3.4, sd 0.0 (n=200)
+paper Table III: init 4914 ms; per-step base 317 ms vs CGVD 421 ms (+104)

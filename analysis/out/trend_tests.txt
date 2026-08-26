@@ -1,0 +1,8 @@
+pi0 spoon semantic: mean per-seed slope of (CGVD-baseline) vs count = +1.54 pp/distractor (SD 0.88, t(9)=5.54, p=0.0004)
+pi0 spoon control: mean per-seed slope of (CGVD-baseline) vs count = +0.58 pp/distractor (SD 0.70, t(9)=2.61, p=0.0282)
+pi0 carrot semantic: mean per-seed slope of (CGVD-baseline) vs count = -0.25 pp/distractor (SD 0.95, t(9)=-0.84, p=0.4241)
+pi0 carrot control: mean per-seed slope of (CGVD-baseline) vs count = +0.40 pp/distractor (SD 1.18, t(9)=1.07, p=0.3118)
+gr00t spoon semantic: mean per-seed slope of (CGVD-baseline) vs count = +0.74 pp/distractor (SD 0.84, t(9)=2.77, p=0.0216)
+gr00t spoon control: mean per-seed slope of (CGVD-baseline) vs count = +0.87 pp/distractor (SD 0.75, t(9)=3.69, p=0.0050)
+gr00t carrot semantic: mean per-seed slope of (CGVD-baseline) vs count = +0.13 pp/distractor (SD 0.62, t(9)=0.65, p=0.5293)
+gr00t carrot control: mean per-seed slope of (CGVD-baseline) vs count = +0.43 pp/distractor (SD 0.80, t(9)=1.68, p=0.1271)

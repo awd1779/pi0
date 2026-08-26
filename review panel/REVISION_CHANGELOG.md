@@ -35,16 +35,17 @@ Every item ID is from `CGVD_REVISION_BRIEF.md`; findings are in the seat reports
 | R23 copy-edit sweep | done | throughout + references.bib | fragment fixed, "in clutter", articles, Fig. 2 "tar"→(target, anchor), Table I headers π0/π0+CGVD, "SAM 3" unified, task names italic lowercase, robogen author list restored, Open X-Embodiment corporate author, obeyed title corrected to "Clutter-Robust" (per arXiv), author-name typo "Sangmim"→"Sangmin" in \thanks (email left as-is — author should verify) |
 | Page budget | in progress | — | compiles cleanly, currently 9 pp. with red \todo markers; final squeeze after Phase 2 replaces todos with data and adds the main-results table; planned cuts: Fig. 1 (~⅓ col) and further §II trims if needed |
 
-## Phase 2 — Tier B re-analysis
+## Phase 2 — Tier B re-analysis (script: `analysis/phase2_analysis.py`; outputs: `analysis/out/`, `paper/generated/`)
 | Item | Status | Notes |
 |---|---|---|
-| R24 per-seed + paired analysis | pending | logs available for Fig. 3 grid + ablation |
-| R25 CIs beside headline numbers | pending | |
-| R26 confirmatory contrast | pending | |
-| R27 numeric main-results table | pending | GR00T + carrot numbers exist in logs |
-| R28 false-erasure rate | todo-data | masks not logged (`run_*/cgvd/` empty); needs instrumented re-run |
-| R29 0-distractor noise floor + Table II reuse | pending | |
-| R30 Table I rounding/n | in progress | logs show n=100 (5 seeds), one arm only, n0 off by 1 pt vs table — needs author confirmation + missing Simple-arm logs |
+| R24 per-seed + paired analysis | done | All 48 Fig.-3 conditions: per-seed rates/deltas (`per_seed.csv`), paired t₉ CIs, Wilcoxon, per-condition ICC. **ICC ≈ 0 (median −0.02, max 0.06)** — seed clustering negligible; stated in §IV-A Analysis paragraph. (GR00T carrot-semantic-n18 lacked results.csv; episode outcomes reconstructed *exactly* from per-seed summary.csv — binary outcomes, 20 eps/seed.) |
+| R25 CIs beside headline numbers | done | Ablation table now mean±SD + paired CIs. Robot-mask row **−4.5 [−10.4, +1.4] — not distinguishable from zero**; stated in §IV-D (as the methodology seat predicted). Attribute complex arm: only n4 (+16.0 [+1.2,+30.8]) excludes zero; "non-monotonic variance" language gone. |
+| R26 confirmatory contrast | done | §IV-A declares π0/spoon/semantic/18 confirmatory: +34.5 pp, CI [+20.8,+48.2], paired t p=3×10⁻⁴, Wilcoxon p=0.002; all else labeled exploratory/unadjusted. |
+| R27 numeric main-results table | done | `paper/generated/main_results_table.tex` (auto-generated; \input into §IV) — full 2 policies × 2 tasks × 2 types × 6 counts with mean±SD and bold CIs-excluding-zero. **GR00T and carrot finally have numbers.** "Gap widens" now has per-seed slope tests (`trend_tests.txt`): π0 spoon semantic +1.54 pp/distractor (p=4×10⁻⁴), GR00T +0.74 (p=0.02); carrot: no positive trend. §IV-B rewritten with exact values; also surfaces that *random* clutter on spoon benefits too (π0 +13.0, GR00T +17.0 at n18). |
+| R28 false-erasure rate | todo-compute | masks not logged; planned instrumented re-run of full pipeline @ n18 with `--cgvd_save_debug` (also a fresh 77.5 replication) |
+| R29 0-distractor noise floor + Table II reuse | done | n0 semantic/control cells are the *same runs* (0.0 pp diff — shared, disclosed in Fig. 3 caption + §IV-A). Real replication: π0/carrot/control/18 run twice (2026-02-17 vs 03-04): baseline 52.5 vs 49.5, CGVD 54.5 vs 54.0 — reported in §IV-A. **Table II reuse verified: π0 spoon semantic n18 logs give exactly 43.0/77.5** — stated in Table II caption. |
+| R30 Table I rounding/n | in progress | Complex arm verified: 5 seeds × 20 eps (n=100 → integer grid explained). n1–4 match printed table exactly; printed n0 Complex baseline 85.0 vs logs 86.0 (1 pp discrepancy — open question for author). Simple arm being re-run locally (Docker); regenerated Table I (`paper/generated/attribute_table.tex`) will replace the current one when done. |
+| Table III provenance | todo-data | n18 run logs contain per-episode `baseline_time` 9.3s / `cgvd_time` 10.8s (≈155/180 ms/step incl. env) and SAM3 15.9s / LaMa 3.4s init components — none match Table III's 317/421/4914 ms. Those numbers must come from other hardware (RunPod?) — author must confirm machine + method, else Table III should be re-measured. |
 
 ## Phase 3 — R7 / R32 distractor vocabulary
 | Item | Status | Notes |

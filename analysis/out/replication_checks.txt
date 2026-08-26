@@ -1,0 +1,11 @@
+== 0-distractor physical-identity check (semantic vs control at n=0 are the same condition) ==
+pi0 spoon: baseline 82.0 vs 82.0 (|diff| 0.0 pp); CGVD 85.0 vs 85.0 (|diff| 0.0 pp)
+pi0 carrot: baseline 58.5 vs 58.5 (|diff| 0.0 pp); CGVD 54.5 vs 54.5 (|diff| 0.0 pp)
+gr00t spoon: baseline 49.0 vs 49.0 (|diff| 0.0 pp); CGVD 51.0 vs 51.0 (|diff| 0.0 pp)
+gr00t carrot: baseline 32.0 vs 32.0 (|diff| 0.0 pp); CGVD 28.0 vs 28.0 (|diff| 0.0 pp)
+
+== duplicate-run replication estimates (older batch vs latest) ==
+('pi0', 'carrot', 'control', 18): older n18_e20_r10_20260217_095346 baseline 52.5 / cgvd 54.5  vs latest baseline 49.5 / cgvd 54.0
+
+== Table II reuse check: does pi0/spoon/semantic/n18 reproduce 43.0 / 77.5? ==
+pi0 spoon semantic n18 (logs/clutter_eval/pi0/spoon/spoon/semantic/n18_e20_r10_20260304_111805): baseline 43.0, cgvd 77.5  (paper Table II: 43.0 / 77.5)

@@ -1,0 +1,6 @@
+arm,count,n_episodes,n_seeds,baseline,cgvd,delta,ci_paired_lo,ci_paired_hi,ci_newcombe_lo,ci_newcombe_hi,dir
+complex,0,100,5,86.0,87.0,+1.0,-5.8,7.8,-8.7,10.7,logs/attribute_spoon/spoon/attribute/n0_e20_r5_20260305_233848
+complex,1,100,5,74.0,69.0,-5.0,-26.9,16.9,-17.3,7.5,logs/attribute_spoon/spoon/attribute/n1_e20_r5_20260306_001733
+complex,2,100,5,69.0,77.0,+8.0,-9.9,25.9,-4.3,20.0,logs/attribute_spoon/spoon/attribute/n2_e20_r5_20260306_010001
+complex,3,100,5,64.0,74.0,+10.0,-7.6,27.6,-2.8,22.4,logs/attribute_spoon/spoon/attribute/n3_e20_r5_20260306_014320
+complex,4,100,5,57.0,73.0,+16.0,1.2,30.8,2.8,28.5,logs/attribute_spoon/spoon/attribute/n4_e20_r5_20260306_022713

@@ -1,0 +1,6 @@
+condition,n_episodes,n_seeds,sr,sd_seed,delta_vs_full,ci_lo,ci_hi,source
+baseline,200,10,43.0,16.0,,,,logs/clutter_eval/pi0/spoon/spoon/semantic/n18_e20_r10_20260304_111805
+full_pipeline,200,10,77.5,6.3,,,,logs/clutter_eval/pi0/spoon/spoon/semantic/n18_e20_r10_20260304_111805
+cgvd_no_inpaint,200,10,56.5,16.0,-21.0,-35.3,-6.7,logs/ablation_spoon_semantic_18dist/cgvd_no_inpaint/sweep_results_widowx_spoon_on_towel_semantic.json
+cgvd_no_crossval,200,10,65.0,8.8,-12.5,-20.3,-4.7,logs/ablation_spoon_semantic_18dist/cgvd_no_crossval/sweep_results_widowx_spoon_on_towel_semantic.json
+cgvd_no_robot,200,10,73.0,7.1,-4.5,-10.4,1.4,logs/ablation_spoon_semantic_18dist/cgvd_no_robot/sweep_results_widowx_spoon_on_towel_semantic.json
