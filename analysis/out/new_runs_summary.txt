@@ -1,0 +1,12 @@
+
+R28 in-flight exposure (max per-episode frac, target moves through scene): episodes with max>1%: 103/200 (51.5%), >10%: 70 (35.0%), median max 1.7%
+R28 target-erasure audit (full pipeline, n18 semantic replication): 200 episode-level entries
+  episodes with ANY target pixel inside the inpaint mask (frac>0): 4 (2.0%)
+  episodes with frac>1%: 4 (2.0%); >10%: 4 (2.0%); >50%: 4 (2.0%)
+  mean frac 2.00%, median 0.00%, max 100.0%
+stage1 baseline vla ms/f: n=500 mean 318.1 sd 6.6 median 317.0 IQR [313.2,322.1]
+stage1 CGVD-arm vla ms/f: n=1100 mean 318.5 sd 5.5 median 318.6 IQR [314.5,322.0]
+stage2 CGVD-arm vla ms/f: n=6 mean 318.4 sd 1.4 median 318.0 IQR [317.3,319.0]
+R33 SAM3 robot mask: n=410 frames; latency mean 241.4 ms sd 1.9 median 241.3
+  frames with NO robot detected (px=0): 75 (18.3%)
+  detected-mask size median 20062 px

@@ -384,6 +384,7 @@ class BatchEvaluator:
                 robot_presence_threshold=self.cgvd_robot_threshold,
                 distractor_presence_threshold=self.cgvd_distractor_threshold,
                 robot_mask_source=self.cgvd_robot_mask_source,
+                freeze_distractor_names=bool(getattr(self, 'cgvd_distractor_names_override', False)),
                 target_override=self.cgvd_target_override,
                 anchor_override=self.cgvd_anchor_override,
                 disable_safeset=self.disable_safeset,
@@ -1632,6 +1633,7 @@ def main():
         skip_baseline=args.skip_baseline,
     )
     evaluator.prompt_override = args.prompt
+    evaluator.cgvd_distractor_names_override = bool(args.cgvd_distractor_names)
     evaluator.cgvd_target_override = args.cgvd_target
     evaluator.cgvd_anchor_override = args.cgvd_anchor
     evaluator.source_obj_override = args.source_obj

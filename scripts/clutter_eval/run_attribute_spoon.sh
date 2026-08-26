@@ -12,6 +12,7 @@
 #   ./run_attribute_spoon.sh --skip_baseline           # CGVD only
 #   ./run_attribute_spoon.sh --prompt "put spoon on towel"  # custom VLA prompt
 #   ./run_attribute_spoon.sh --cgvd_target "green spoon"    # custom CGVD target
+#   ./run_attribute_spoon.sh --start_seed 5                # start from seed 5
 #
 # Output: logs/attribute_spoon/
 
@@ -58,6 +59,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --cgvd_target)
             TARGET_OVERRIDE="$2"
+            shift 2
+            ;;
+        --start_seed)
+            START_SEED="$2"
             shift 2
             ;;
         *)
