@@ -56,7 +56,7 @@ Every item ID is from `CGVD_REVISION_BRIEF.md`; findings are in the seat reports
 ## Phase 4 — R33 SAM3 robot mask
 | Item | Status | Notes |
 |---|---|---|
-| R33 SAM3-mask substitution + timing | running | Implemented `robot_mask_source="sam3"` (per-frame SAM3 "robot arm" query replaces the renderer mask). Run in progress (`logs/robotmask_sam3_n18`, 10 matched seeds). **Partial measurements already in:** SAM3 robot mask costs **241.3 ± 1.9 ms/frame** (→ per-step ≈575 ms, ≈1.7 Hz) and **fails to detect the robot in ~18% of frames** (falls back to the last known mask) — quantifying both halves of §III-G's "SAM3 can achieve similar protection" claim. SR delta vs the 76.0 replication lands when the run finishes. FK-projection sentence already in §III-G. |
+| R33 SAM3-mask substitution + timing | **done (measured)** | Full pipeline with per-frame SAM3 robot mask, same 10 seeds: **SR 74.0%** vs 76.0 GT-mask re-execution (paired Δ −2.0 pp, CI [−11.3,+7.3]; vs original 77.5: −3.5 [−12.7,+5.7]) — accuracy statistically unchanged. Cost: **240.7±1.9 ms/frame** (control rate → ≈1.7 Hz) and **20.1% of frames with no robot detection** (stale-mask fallback). New "Deployable robot mask" paragraph in §IV-D; §III-G and §V updated: the renderer mask's privilege is latency/reliability, not accuracy; FK projection remains the hardware path. Data: `logs/robotmask_sam3_n18/`, 12,400 frame-level latency samples. |
 
 ## Phase 5 — R31 BYOVLA comparator
 | Item | Status | Notes |
