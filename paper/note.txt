@@ -1,0 +1,23 @@
+Intro:
+
+%put how some other methods not able to achieve real-time. 
+%Put distracted robot for reference, 
+
+--
+Methodology
+Change Current Image with Real-world settings
+
+
+Experiment:
+Quantitative:
+Semantic, Random
+
+Spoon with different color or material (qualitative)
+Target Swap
+
+Qualitative: 
+Real-robot experiment
+Show proof of VLA distracted using the attention map
+Show how much Grasp SR increases and Collision Decrease
+
+-- do qualitativve analysis with real robot
