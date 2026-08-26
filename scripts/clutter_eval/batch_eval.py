@@ -151,6 +151,8 @@ class BatchEvaluator:
         cgvd_robot_threshold: float = 0.3,
         cgvd_distractor_threshold: float = 0.20,
         cgvd_robot_mask_source: str = "gt",
+        eval_byovla: bool = False,
+        byovla_thresh: float = 0.002,
         save_attention: bool = False,
         disable_inpaint: bool = False,
         use_gt_masks: bool = False,
@@ -195,6 +197,10 @@ class BatchEvaluator:
         self.cgvd_robot_threshold = cgvd_robot_threshold
         self.cgvd_distractor_threshold = cgvd_distractor_threshold
         self.cgvd_robot_mask_source = cgvd_robot_mask_source
+        self.eval_byovla = eval_byovla
+        self.byovla_thresh = byovla_thresh
+        self._byovla = None
+        self._byovla_segmenter = None
         self.save_attention = save_attention
         self.disable_inpaint = disable_inpaint
         self.use_gt_masks = use_gt_masks
@@ -258,6 +264,53 @@ class BatchEvaluator:
         data["model"] = {k.replace("_orig_mod.", ""): v for k, v in data["model"].items()}
         self.model.load_state_dict(data["model"], strict=True)
 
+    def _write_image_into_obs(self, obs, image, env):
+        """Write an edited image back into the observation dict (same camera the VLA reads)."""
+        unwrapped = env.unwrapped
+        if "google_robot" in unwrapped.robot_uid:
+            camera_name = "overhead_camera"
+        elif "widowx" in unwrapped.robot_uid:
+            camera_name = "3rd_view_camera"
+        else:
+            camera_name = next(iter(obs.get("image", {})), None)
+        if camera_name and "image" in obs and camera_name in obs["image"]:
+            obs["image"][camera_name]["rgb"] = image
+        return obs
+
+    def _probe_actions(self, env, obs, instruction, image, seed):
+        """Run the frozen policy on `obs` with `image` substituted; return the
+        UNNORMALIZED action chunk [n_steps, dims] (translation in meters first).
+        A fixed torch seed makes clean-vs-perturbed probes comparable."""
+        import copy as _copy
+        obs2 = _copy.deepcopy(obs)
+        obs2 = self._write_image_into_obs(obs2, image, env)
+        inputs = self.env_adapter.preprocess(env, obs2, instruction)
+        causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
+            self.model.build_causal_mask_and_position_ids(
+                inputs["attention_mask"], dtype=self.dtype
+            )
+        )
+        image_text_proprio_mask, action_mask = self.model.split_full_mask_into_submasks(causal_mask)
+        inputs = {
+            "input_ids": inputs["input_ids"],
+            "pixel_values": inputs["pixel_values"].to(self.dtype),
+            "image_text_proprio_mask": image_text_proprio_mask,
+            "action_mask": action_mask,
+            "vlm_position_ids": vlm_position_ids,
+            "proprio_position_ids": proprio_position_ids,
+            "action_position_ids": action_position_ids,
+            "proprios": inputs["proprios"].to(self.dtype),
+        }
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        if seed is not None:
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+        with torch.inference_mode():
+            actions = self.model(**inputs)
+        env_actions = self.env_adapter.postprocess(actions[0].float().cpu().numpy())
+        return np.asarray(env_actions)
+
     def _create_env(self, config: EvalConfig, use_cgvd: bool = False, output_dir: Optional[str] = None):
         """Create environment for a configuration."""
         env = simpler_env.make(config.task)
@@ -289,6 +342,24 @@ class BatchEvaluator:
                 randomize_per_episode=config.randomize_distractors,
                 placement=self.placement,
             )
+
+        # BYOVLA comparator mode: the "cgvd" arm becomes a BYOVLA arm
+        # (per-chunk segment -> sensitivity probe -> inpaint; no CGVD wrapper).
+        if use_cgvd and getattr(self, 'eval_byovla', False):
+            from src.cgvd.byovla_intervention import BYOVLAIntervention
+            from src.cgvd.sam3_segmenter import SAM3Segmenter
+            from src.cgvd.lama_inpainter import get_lama_inpainter
+            if getattr(self, '_byovla_segmenter', None) is None:
+                self._byovla_segmenter = SAM3Segmenter(
+                    presence_threshold=self.cgvd_distractor_threshold)
+            self._byovla = BYOVLAIntervention(
+                segmenter=self._byovla_segmenter,
+                inpainter=get_lama_inpainter(),
+                distractor_names=config.cgvd_distractor_names,
+                distractor_threshold=self.cgvd_distractor_threshold,
+                thresh=self.byovla_thresh,
+            )
+            return env
 
         # Optionally wrap with CGVD
         if use_cgvd:
@@ -352,6 +423,8 @@ class BatchEvaluator:
         }
         obs, _ = env.reset(options=env_reset_options)
         instruction = self.prompt_override or env.unwrapped.get_language_instruction()
+        if use_cgvd and getattr(self, 'eval_byovla', False) and getattr(self, '_byovla', None) is not None:
+            self._byovla.reset()
 
         # Initialize collision tracker (only if distractors are present)
         collision_tracker = None
@@ -390,6 +463,19 @@ class BatchEvaluator:
                 raw_image = get_image_from_maniskill2_obs_dict(env, obs)
                 frame_path = os.path.join(frames_dir, f"frame_{inference_step:04d}.png")
                 cv2.imwrite(frame_path, cv2.cvtColor(raw_image, cv2.COLOR_RGB2BGR))
+
+            # BYOVLA arm: intervene on the observation before every inference
+            # call (segment -> per-object sensitivity probe -> inpaint).
+            if use_cgvd and getattr(self, 'eval_byovla', False) and getattr(self, '_byovla', None) is not None:
+                _rng_cpu = torch.get_rng_state()
+                _rng_gpu = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+                raw_img = get_image_from_maniskill2_obs_dict(env, obs)
+                probe = lambda im, seed: self._probe_actions(env, obs, instruction, im, seed)
+                transformed = self._byovla.transform(raw_img, probe)
+                obs = self._write_image_into_obs(obs, transformed, env)
+                torch.set_rng_state(_rng_cpu)
+                if _rng_gpu is not None:
+                    torch.cuda.set_rng_state_all(_rng_gpu)
 
             inputs = self.env_adapter.preprocess(env, obs, instruction)
             causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
@@ -1464,6 +1550,12 @@ def main():
                        help="Override SAM3 target concept (e.g. 'spoon with green handle')")
     parser.add_argument("--cgvd_anchor", type=str, default=None,
                        help="Override SAM3 anchor concept (e.g. 'towel')")
+    parser.add_argument("--eval_byovla", action="store_true",
+                       help="Replace the CGVD arm with a BYOVLA arm (vocabulary-matched "
+                            "reimplementation; see src/cgvd/byovla_intervention.py).")
+    parser.add_argument("--byovla_thresh", type=float, default=0.002,
+                       help="BYOVLA sensitivity threshold on the translation action delta "
+                            "in meters (reference implementation: 0.002).")
     parser.add_argument("--cgvd_robot_mask_source", type=str, default="gt",
                        choices=["gt", "sam3"],
                        help="Robot-mask source for CGVD compositing: 'gt' = renderer "
@@ -1527,6 +1619,8 @@ def main():
         cgvd_robot_threshold=args.cgvd_robot_threshold,
         cgvd_distractor_threshold=args.cgvd_distractor_threshold,
         cgvd_robot_mask_source=args.cgvd_robot_mask_source,
+        eval_byovla=args.eval_byovla,
+        byovla_thresh=args.byovla_thresh,
         save_attention=args.save_attention,
         disable_inpaint=args.disable_inpaint,
         use_gt_masks=args.use_gt_masks,

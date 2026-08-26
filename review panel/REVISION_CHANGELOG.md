@@ -50,18 +50,18 @@ Every item ID is from `CGVD_REVISION_BRIEF.md`; findings are in the seat reports
 ## Phase 3 — R7 / R32 distractor vocabulary
 | Item | Status | Notes |
 |---|---|---|
-| R7 disclosure of D | pending | D = category names of injected assets (oracle) — confirmed in `load_distractors_from_file()` |
-| R32 OOV condition | todo-compute | REQUIRED (gate triggered). Config/script to prepare; needs approval |
+| R7 disclosure of D | done | §III-B + §IV-A now state D is built from the injected assets' category labels (closed vocabulary, oracle inventory); "no additional API" claim scoped to the closed-vocabulary setting; deployment story stated |
+| R32 OOV condition | **running** | Gate triggered (D = injection list). Two cells queued (`run_revision_queue.sh` jobs 3–4), CGVD arm only on the exact headline episodes (matched seeds; baseline 43.0 reused): **cell A** — D override `ladle,whisk,bowl,cup` (vocabulary misses the clutter); **cell B** — generic 12-category tabletop vocabulary not derived from the injection list. Enabled by new `--cgvd_distractor_names` flag. Results → §IV on completion. |
 
 ## Phase 4 — R33 SAM3 robot mask
 | Item | Status | Notes |
 |---|---|---|
-| R33 SAM3-mask substitution + timing | todo-compute | to prepare; needs approval |
+| R33 SAM3-mask substitution + timing | prepared (queued) | Implemented `robot_mask_source="sam3"`: per-frame SAM3 "robot arm" query replaces the renderer mask for the compositing overwrite; per-frame latency printed to cgvd.log. Run = `run_revision_queue2.sh` (n18 semantic, 10 matched seeds, CGVD arm only) — launches after stage 1. FK-projection sentence already added to §III-G in Phase 1. |
 
 ## Phase 5 — R31 BYOVLA comparator
 | Item | Status | Notes |
 |---|---|---|
-| R31 BYOVLA on same setup | todo-compute | check public code; needs approval |
+| R31 BYOVLA on same setup | prepared (queue stage 3) | Public code found (`github.com/irom-princeton/byovla`) — a real-robot Octo reference implementation using GPT-4o + GroundingDINO/SAM2 + LaMa. Reimplemented for SimplerEnv+π0 in `src/cgvd/byovla_intervention.py` with three **disclosed substitutions**: (1) GPT-4o → the same closed vocabulary D CGVD uses (no API key available here; also removes the VLM-quality confound → vocabulary-matched comparison), (2) GroundingDINO+SAM2 → SAM 3 (shared with CGVD), (3) Octo fixed-PRNGKey sampling → π0 fixed-torch-seed probes (N=1 deterministic vs reference N=5). Kept faithful: per-object Gaussian-blur perturbation (kernel 15–30), translation-only weighted delta w=[1,1,1,0,0,0,0], threshold 0.002 m on unnormalized actions, inpaint dilation 10, intervention before every action chunk. Run: `run_revision_queue3.sh smoke` then `full` (~8–13 h; wall-clock per chunk logged for the efficiency comparison). |
 
 ## Open questions for the author
 1. **Table I:** local logs = 5 seeds (n=100) matching the Complex column (n1–4 exactly; n0 86.0 vs printed 85.0). Where are the Simple-arm logs, and was the Complex n0 cell 85 or 86? If the missing data can't be located, the caption must say 5 seeds/100 episodes and the n0 discrepancy must be resolved from whatever source produced the table.
