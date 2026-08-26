@@ -85,6 +85,8 @@ class EpisodeResult:
     sam3_time: float = 0.0  # Total SAM3 segmentation time
     lama_time: float = 0.0  # Total LaMa inpainting time
     mask_coverage_pct: float = 0.0  # % of image covered by CGVD mask
+    init_time: float = 0.0  # CGVD init time (t=0: warmup + first composite)
+    avg_runtime_time: float = 0.0  # Avg CGVD time per frame for t>0
 
     @property
     def hard_success(self) -> bool:
@@ -148,6 +150,7 @@ class BatchEvaluator:
         cgvd_safe_threshold: float = 0.6,
         cgvd_robot_threshold: float = 0.3,
         cgvd_distractor_threshold: float = 0.20,
+        cgvd_robot_mask_source: str = "gt",
         save_attention: bool = False,
         disable_inpaint: bool = False,
         use_gt_masks: bool = False,
@@ -191,6 +194,7 @@ class BatchEvaluator:
         self.cgvd_safe_threshold = cgvd_safe_threshold
         self.cgvd_robot_threshold = cgvd_robot_threshold
         self.cgvd_distractor_threshold = cgvd_distractor_threshold
+        self.cgvd_robot_mask_source = cgvd_robot_mask_source
         self.save_attention = save_attention
         self.disable_inpaint = disable_inpaint
         self.use_gt_masks = use_gt_masks
@@ -308,6 +312,7 @@ class BatchEvaluator:
                 cache_distractor_once=True,
                 robot_presence_threshold=self.cgvd_robot_threshold,
                 distractor_presence_threshold=self.cgvd_distractor_threshold,
+                robot_mask_source=self.cgvd_robot_mask_source,
                 target_override=self.cgvd_target_override,
                 anchor_override=self.cgvd_anchor_override,
                 disable_safeset=self.disable_safeset,
@@ -484,6 +489,8 @@ class BatchEvaluator:
         sam3_time = 0.0
         lama_time = 0.0
         mask_coverage_pct = 0.0
+        init_time = 0.0
+        avg_runtime_time = 0.0
         if use_cgvd:
             # Try to get timing from CGVDWrapper
             cgvd_wrapper = self._get_cgvd_wrapper(env)
@@ -492,6 +499,8 @@ class BatchEvaluator:
                 cgvd_time = timing_stats.get("total_cgvd_time", 0.0)
                 sam3_time = timing_stats.get("total_sam3_time", 0.0)
                 lama_time = timing_stats.get("total_lama_time", 0.0)
+                init_time = timing_stats.get("init_time", 0.0)
+                avg_runtime_time = timing_stats.get("avg_runtime_cgvd_time", 0.0)
                 mask_coverage_pct = cgvd_wrapper.mask_coverage_pct
 
         return EpisodeResult(
@@ -507,6 +516,8 @@ class BatchEvaluator:
             sam3_time=sam3_time,
             lama_time=lama_time,
             mask_coverage_pct=mask_coverage_pct,
+            init_time=init_time,
+            avg_runtime_time=avg_runtime_time,
         )
 
     def _get_cgvd_wrapper(self, env):
@@ -606,6 +617,7 @@ class BatchEvaluator:
                     parts.append(placed)
                 if names:
                     parts.append(f"[{names}]")
+                parts.append(f"vla={result.inference_time*1000:.1f}ms/f")
                 parts.append(f"{result.episode_time:.0f}s")
                 parts.append(status)
                 print("  ".join(parts))
@@ -639,6 +651,9 @@ class BatchEvaluator:
             if names:
                 parts.append(f"[{names}]")
             parts.append(f"mask={result.mask_coverage_pct:.1f}%")
+            parts.append(f"init={result.init_time*1000:.0f}ms")
+            parts.append(f"vla={result.inference_time*1000:.1f}ms/f")
+            parts.append(f"rt={result.avg_runtime_time*1000:.1f}ms/f")
             parts.append(f"{result.episode_time:.0f}s")
             parts.append(status)
             print("  ".join(parts))
@@ -945,6 +960,40 @@ class BatchEvaluator:
                     f.write(f"| LaMa | {np.mean(lama_times):.3f} | {np.std(lama_times):.3f} | {min(lama_times):.3f} | {max(lama_times):.3f} |\n")
                 f.write("\n")
 
+                # Init (t=0) vs Runtime (t>0) breakdown
+                init_times = [e.init_time for r in results for e in r.cgvd_results if e.init_time > 0]
+                runtime_times = [e.avg_runtime_time for r in results for e in r.cgvd_results if e.avg_runtime_time > 0]
+                baseline_vla_times = [e.inference_time for r in results for e in r.baseline_results if e.inference_time > 0]
+                cgvd_vla_times = [e.inference_time for r in results for e in r.cgvd_results if e.inference_time > 0]
+                if init_times or runtime_times:
+                    f.write("### Init (t=0) vs Runtime (t>0)\n\n")
+                    f.write("| Phase | Base π₀ (ms) | CGVD (ms) |\n")
+                    f.write("|-------|-------------|----------|\n")
+                    baseline_init = "0"
+                    cgvd_init = f"{np.mean(init_times)*1000:.1f}" if init_times else "—"
+                    f.write(f"| Init (t=0) | {baseline_init} | {cgvd_init} |\n")
+                    baseline_exec = f"{np.mean(baseline_vla_times)*1000:.1f}" if baseline_vla_times else "—"
+                    if runtime_times and cgvd_vla_times:
+                        cgvd_exec = f"{(np.mean(cgvd_vla_times) + np.mean(runtime_times))*1000:.1f}"
+                    elif cgvd_vla_times:
+                        cgvd_exec = f"{np.mean(cgvd_vla_times)*1000:.1f}"
+                    else:
+                        cgvd_exec = "—"
+                    f.write(f"| Execution (t>0, per frame) | {baseline_exec} | {cgvd_exec} |\n")
+                    f.write("\n")
+                    # Raw component breakdown
+                    f.write("| Component | Mean (ms) | Std (ms) |\n")
+                    f.write("|-----------|-----------|----------|\n")
+                    if baseline_vla_times:
+                        f.write(f"| VLA inference (baseline) | {np.mean(baseline_vla_times)*1000:.1f} | {np.std(baseline_vla_times)*1000:.1f} |\n")
+                    if cgvd_vla_times:
+                        f.write(f"| VLA inference (CGVD) | {np.mean(cgvd_vla_times)*1000:.1f} | {np.std(cgvd_vla_times)*1000:.1f} |\n")
+                    if runtime_times:
+                        f.write(f"| CGVD compositing (t>0) | {np.mean(runtime_times)*1000:.1f} | {np.std(runtime_times)*1000:.1f} |\n")
+                    if init_times:
+                        f.write(f"| CGVD init (t=0) | {np.mean(init_times)*1000:.1f} | {np.std(init_times)*1000:.1f} |\n")
+                    f.write("\n")
+
             f.write("## Per-Episode Details\n\n")
             for i, r in enumerate(results):
                 f.write(f"### Run {i+1} (Seed: {r.config.seed})\n\n")
@@ -964,14 +1013,17 @@ class BatchEvaluator:
             f.write("run,seed,episode,episode_id,baseline_success,cgvd_success,"
                     "baseline_hard_success,cgvd_hard_success,baseline_time,cgvd_time,"
                     "baseline_collisions,cgvd_collisions,baseline_failure_mode,cgvd_failure_mode,"
-                    "cgvd_pipeline_time,sam3_time,lama_time,mask_coverage_pct\n")
+                    "cgvd_pipeline_time,sam3_time,lama_time,mask_coverage_pct,"
+                    "init_time_ms,avg_runtime_time_ms,baseline_vla_ms,cgvd_vla_ms\n")
             for r in results:
                 for i, (b, c) in enumerate(zip(r.baseline_results, r.cgvd_results)):
                     f.write(f"{r.config.run_index},{r.config.seed},{i},{b.episode_id},"
                            f"{int(b.success)},{int(c.success)},"
                            f"{int(b.hard_success)},{int(c.hard_success)},{b.episode_time:.2f},{c.episode_time:.2f},"
                            f"{b.collision_count},{c.collision_count},{b.failure_mode},{c.failure_mode},"
-                           f"{c.cgvd_time:.3f},{c.sam3_time:.3f},{c.lama_time:.3f},{c.mask_coverage_pct:.1f}\n")
+                           f"{c.cgvd_time:.3f},{c.sam3_time:.3f},{c.lama_time:.3f},{c.mask_coverage_pct:.1f},"
+                           f"{c.init_time*1000:.1f},{c.avg_runtime_time*1000:.1f},"
+                           f"{b.inference_time*1000:.1f},{c.inference_time*1000:.1f}\n")
 
         # Save summary.csv (per-run) with new metrics
         summary_path = os.path.join(output_dir, "summary.csv")
@@ -1142,6 +1194,11 @@ def generate_configs(args) -> List[EvalConfig]:
             else:
                 # Load only the first num_dist distractors
                 distractors, cgvd_names = load_distractors_from_file(distractor_file, category, num_dist)
+
+            # Optional decoupled CGVD vocabulary (out-of-vocabulary experiments)
+            if getattr(args, 'cgvd_distractor_names', None):
+                cgvd_names = [s.strip() for s in args.cgvd_distractor_names.split(",") if s.strip()]
+                print(f"  CGVD distractor vocabulary OVERRIDE: {cgvd_names}")
 
             # Exclude source_obj from distractors (avoid spawning target as distractor)
             if getattr(args, 'source_obj', None) and args.source_obj in [d.split(":")[0] for d in distractors]:
@@ -1407,6 +1464,16 @@ def main():
                        help="Override SAM3 target concept (e.g. 'spoon with green handle')")
     parser.add_argument("--cgvd_anchor", type=str, default=None,
                        help="Override SAM3 anchor concept (e.g. 'towel')")
+    parser.add_argument("--cgvd_robot_mask_source", type=str, default="gt",
+                       choices=["gt", "sam3"],
+                       help="Robot-mask source for CGVD compositing: 'gt' = renderer "
+                            "segmentation (simulation-privileged), 'sam3' = per-frame "
+                            "SAM3 prediction (deployable path; per-frame latency logged).")
+    parser.add_argument("--cgvd_distractor_names", type=str, default=None,
+                       help="Override CGVD's distractor vocabulary D with a comma-separated "
+                            "category list (e.g. 'ladle,whisk,bowl'). By default D is derived "
+                            "from the injected distractor asset list; this flag decouples them "
+                            "for out-of-vocabulary experiments.")
 
     # Source object override
     parser.add_argument("--source_obj", type=str, default=None,
@@ -1459,6 +1526,7 @@ def main():
         cgvd_safe_threshold=args.cgvd_safe_threshold,
         cgvd_robot_threshold=args.cgvd_robot_threshold,
         cgvd_distractor_threshold=args.cgvd_distractor_threshold,
+        cgvd_robot_mask_source=args.cgvd_robot_mask_source,
         save_attention=args.save_attention,
         disable_inpaint=args.disable_inpaint,
         use_gt_masks=args.use_gt_masks,
