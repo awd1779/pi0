@@ -23,7 +23,7 @@ def p(s):
 # ---------- R28: target erasure (replication run) ----------
 # TARGET_ERASURE prints only reach the queue stdout log; slice out job 2.
 er_eps = []
-qlog = os.path.join(ROOT, "analysis/queue_run.log")
+qlog = os.path.join(ROOT, "analysis/runlogs/queue_run.log")
 if os.path.exists(qlog):
     text = open(qlog).read()
     m = re.search(r"=== \[2/4\].*?===(.*?)=== \[2/4\] done", text, re.S)
@@ -61,7 +61,7 @@ if er_eps:
     p(f"  mean frac {er.mean()*100:.2f}%, median {np.median(er)*100:.2f}%, max {er.max()*100:.1f}%")
 
 # ---------- Table III: vla ms/f by arm ----------
-for name, log in (("stage1", "analysis/queue_run.log"), ("stage2", "analysis/queue2_run.log")):
+for name, log in (("stage1", "analysis/runlogs/queue_run.log"), ("stage2", "analysis/runlogs/queue2_run.log")):
     path = os.path.join(ROOT, log)
     if not os.path.exists(path):
         continue
@@ -78,7 +78,7 @@ for name, log in (("stage1", "analysis/queue_run.log"), ("stage2", "analysis/que
           f"median {np.median(c):.1f} IQR [{np.percentile(c,25):.1f},{np.percentile(c,75):.1f}]")
 
 # ---------- R33: SAM3 robot mask latency + reliability ----------
-path = os.path.join(ROOT, "analysis/queue2_run.log")
+path = os.path.join(ROOT, "analysis/runlogs/queue2_run.log")
 if os.path.exists(path):
     ms, px = [], []
     for m in re.finditer(r"SAM3_ROBOT_MASK frame=(\d+) ms=([0-9.]+) px=(\d+)", open(path).read()):

@@ -25,8 +25,10 @@ All revision work is on git branch **`revision-panel-r1`**.
 |---|---|
 | `../analysis/phase2_analysis.py` | Re-analysis of all rollout logs: per-seed rates, paired CIs, ICC, trend tests, replication checks. Re-run any time; safe. |
 | `../analysis/out/` | Its outputs: `main_results.csv`, `per_seed.csv`, `ablation.csv`, `attribute.csv`, `trend_tests.txt`, `replication_checks.txt`, `timing.txt`. |
-| `../analysis/run_revision_queue.sh` | GPU queue stage 1 (running in background): ① Table I Simple-arm re-run ② n18 replication + target-erasure audit ③④ out-of-vocabulary conditions. Log: `../analysis/queue_run.log`. |
-| `../analysis/run_revision_queue2.sh` | Stage 2: SAM3 per-frame robot-mask substitution (R33). |
-| `../analysis/run_revision_queue3.sh` | Stage 3: BYOVLA comparator (`smoke` then `full`). |
+| `../analysis/run_revision_queue.sh` | GPU queue stage 1 (done): ① Table I Simple-arm re-run ② n18 replication + target-erasure audit ③④ OOV conditions (v1, superseded). |
+| `../analysis/run_revision_queue2.sh` / `2b.sh` | Stage 2 (done): SAM3 robot-mask substitution (R33); stage 2b (done): OOV v2 with frozen vocabulary + descriptive-target attribute arm. |
+| `../analysis/run_revision_queue3.sh` | Stage 3: BYOVLA comparator — `smoke` (done) then `full` (running). |
+| `../analysis/parse_new_runs.py` | Parses erasure audit, timing, robot-mask stats from `runlogs/` → `out/new_runs_summary.txt`. |
+| `../analysis/runlogs/` | Raw stdout of every revision run (gitignored; kept on disk as provenance). |
 
-New logs land in `../logs/attribute_spoon_simple`, `../logs/replication_masks_n18`, `../logs/oov_n18_miss`, `../logs/oov_n18_generic`, `../logs/robotmask_sam3_n18`, `../logs/byovla_n18`.
+New rollout logs (gitignored, on this machine): `../logs/attribute_spoon_simple{,_desc}`, `../logs/replication_masks_n18`, `../logs/oov_n18_{miss,generic}_v2`, `../logs/robotmask_sam3_n18`, `../logs/byovla_n18{,_smoke}`.
