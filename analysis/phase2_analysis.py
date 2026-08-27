@@ -239,9 +239,9 @@ def main():
     lines.append("% Mean success rate (%) ± SD across the 10 matched seeds (20 episodes/seed).")
     lines.append("\\begin{table*}[t]")
     lines.append("\\centering")
-    lines.append("\\caption{\\textbf{Main results (numeric).} Success rate (\\%), mean $\\pm$ SD over the 10 matched seeds (20 episodes per seed; 200 episodes per cell). $\\Delta$ is the CGVD $-$ baseline difference with a 95\\% CI from the per-seed paired deltas ($t_9$). Bold marks deltas whose paired CI excludes zero. These are the data plotted in Fig.~\\ref{fig:scaling}.}")
+    lines.append("\\caption{\\textbf{Main results (numeric).} Success rate (\\%), mean $\\pm$ SD over 10 matched seeds (200 episodes/cell); $\\Delta$ with 95\\% CI from per-seed paired deltas ($t_9$), bold when the CI excludes zero. Data of Fig.~\\ref{fig:scaling}.}")
     lines.append("\\label{tab:main_numeric}")
-    lines.append("\\renewcommand{\\arraystretch}{1.15}")
+    lines.append("\\renewcommand{\\arraystretch}{1.05}")
     lines.append("\\resizebox{\\textwidth}{!}{%")
     lines.append("\\begin{tabular}{ll" + "ccc" * 4 + "}")
     lines.append("\\hline")
@@ -342,11 +342,11 @@ def main():
         ns = attr_stats[("complex", counts_both[0])]["n_seeds"]
         ne = attr_stats[("complex", counts_both[0])]["n_episodes"]
         tl.append("\\begin{table}[!t]\n\\centering")
-        tl.append("\\caption{\\textbf{Attribute Distractor Sensitivity.} Success rates on \\textit{put spoon on towel} with attribute distractors ($\\pi_0$ only), "
-                  f"{ne} episodes per cell ({ns} matched seeds $\\times$ 20 episodes). "
-                  "$\\Delta$ carries a 95\\% CI from per-seed paired deltas; bold marks deltas whose CI excludes zero. Deltas whose CI contains zero are within run-to-run noise.}")
+        tl.append("\\caption{\\textbf{Attribute Distractor Sensitivity} on \\textit{put spoon on towel} ($\\pi_0$, "
+                  f"{ne} episodes/cell, {ns} matched seeds). "
+                  "$\\Delta$: 95\\% CI from per-seed paired deltas; bold = CI excludes zero; otherwise within run-to-run noise.}")
         tl.append("\\label{tab:combined_attribute_scaling}")
-        tl.append("\\renewcommand{\\arraystretch}{1.2}")
+        tl.append("\\renewcommand{\\arraystretch}{1.05}")
         tl.append("\\resizebox{\\columnwidth}{!}{%")
         tl.append("\\begin{tabular}{l ccc ccc}\n\\hline")
         tl.append("& \\multicolumn{3}{c}{\\textbf{Simple Prompt}}\n& \\multicolumn{3}{c}{\\textbf{Complex Prompt}} \\\\")

@@ -24,18 +24,17 @@
 \bibitem{openvla}
 M.~J. Kim, K.~Pertsch, S.~Karamcheti, T.~Xiao, A.~Balakrishna, S.~Nair
   \emph{et~al.}, ``Openvla: An open-source vision-language-action model,'' in
-  \emph{Proceedings of The 8th Conference on Robot Learning (CoRL)}, 2024.
+  \emph{Conference on Robot Learning (CoRL)}, 2024.
 
 \bibitem{rt2}
 A.~Brohan, N.~Brown, J.~Carbajal, Y.~Chebotar, X.~Chen, K.~Choromanski
   \emph{et~al.}, ``Rt-2: Vision-language-action models transfer web knowledge
-  to robotic control,'' in \emph{Proceedings of The 7th Conference on Robot
-  Learning (CoRL)}, 2023.
+  to robotic control,'' in \emph{Conference on Robot Learning (CoRL)}, 2023.
 
 \bibitem{octo}
 D.~Ghosh, H.~Walke, K.~Pertsch, K.~Black, O.~Mees, S.~Dasari \emph{et~al.},
-  ``Octo: An open-source generalist robot policy,'' in \emph{Proceedings of
-  Robotics: Science and Systems (RSS)}, 2024.
+  ``Octo: An open-source generalist robot policy,'' in \emph{Robotics: Science
+  and Systems (RSS)}, 2024.
 
 \bibitem{gr00t}
 J.~Bjorck, F.~Castaneda, N.~Cherniadev, X.~Da, R.~Ding, L.~Fan \emph{et~al.},
@@ -70,12 +69,12 @@ A.~J. Hancock, A.~Z. Ren, and A.~Majumdar, ``Run-time observation interventions
 \bibitem{rosie}
 T.~Yu, T.~Xiao, A.~Stone, J.~Tompson, A.~Brohan, S.~Wang \emph{et~al.},
   ``Scaling robot learning with semantically imagined experience,'' in
-  \emph{Proceedings of Robotics: Science and Systems (RSS)}, 2023.
+  \emph{Robotics: Science and Systems (RSS)}, 2023.
 
 \bibitem{genaug}
 Q.~Chen, S.~Kiami, A.~Gupta, and V.~Kumar, ``Gen{A}ug: Retargeting behaviors to
-  unseen situations via generative augmentation,'' in \emph{Proceedings of
-  Robotics: Science and Systems (RSS)}, 2023.
+  unseen situations via generative augmentation,'' in \emph{Robotics: Science
+  and Systems (RSS)}, 2023.
 
 \bibitem{nice}
 S.~Pakdamansavoji, M.~Pourkeshavarz, A.~Sigal, Z.~Li, R.~H. Yang, and
@@ -91,7 +90,7 @@ N.~Carion, L.~Gustafson, Y.-T. Hu, S.~Debnath, R.~Hu, D.~Suris \emph{et~al.},
 R.~Suvorov, E.~Logacheva, A.~Mashikhin, A.~Remizova, A.~Ashukha, A.~Silvestrov
   \emph{et~al.}, ``Resolution-robust large mask inpainting with fourier
   convolutions,'' in \emph{IEEE/CVF Winter Conference on Applications of
-  Computer Vision (WACV)}, 2022, pp. 2149--2159.
+  Computer Vision (WACV)}, 2022.
 
 \bibitem{vit_analysis}
 M.~Raghu, T.~Unterthiner, S.~Kornblith, C.~Zhang, and A.~Dosovitskiy, ``Do
@@ -101,8 +100,8 @@ M.~Raghu, T.~Unterthiner, S.~Kornblith, C.~Zhang, and A.~Dosovitskiy, ``Do
 \bibitem{c2f_q_attention}
 S.~James, K.~Wada, T.~Laidlow, and A.~J. Davison, ``Coarse-to-fine
   {Q-Attention}: efficient learning for visual robotic manipulation via
-  discretisation,'' in \emph{Proceedings of the IEEE/CVF Conference on Computer
-  Vision and Pattern Recognition (CVPR)}, 2022.
+  discretisation,'' in \emph{IEEE/CVF Conference on Computer Vision and Pattern
+  Recognition (CVPR)}, 2022.
 
 \bibitem{groundingdino}
 S.~Liu, Z.~Zeng, T.~Ren, F.~Li, H.~Zhang, J.~Yang \emph{et~al.}, ``Grounding
@@ -117,7 +116,7 @@ W.~Huang, C.~Wang, R.~Zhang, Y.~Li, J.~Wu, and L.~Fei-Fei, ``Voxposer:
 \bibitem{conceptfusion}
 K.~M. Jatavallabhula, A.~Kuwajerwala, Q.~Gu, M.~Omama, T.~Chen, A.~Maalouf
   \emph{et~al.}, ``Conceptfusion: Open-set multimodal 3d mapping,'' in
-  \emph{Proceedings of Robotics: Science and Systems (RSS)}, 2023.
+  \emph{Robotics: Science and Systems (RSS)}, 2023.
 
 \bibitem{robogen}
 Y.~Wang, Z.~Xian, F.~Chen, T.-H. Wang, Y.~Wang, K.~Fragkiadaki \emph{et~al.},
@@ -127,15 +126,14 @@ Y.~Wang, Z.~Xian, F.~Chen, T.-H. Wang, Y.~Wang, K.~Fragkiadaki \emph{et~al.},
 
 \bibitem{RoboticVisualInstruction}
 Y.~Li, Z.~Gong, H.~Li, X.~Huang, H.~Kang, G.~Bai \emph{et~al.}, ``Robotic
-  visual instruction,'' in \emph{Proceedings of the IEEE/CVF Conference on
-  Computer Vision and Pattern Recognition (CVPR)}, 2025, pp. 12\,155--12\,165.
+  visual instruction,'' in \emph{IEEE/CVF Conference on Computer Vision and
+  Pattern Recognition (CVPR)}, 2025, pp. 12\,155--12\,165.
 
 \bibitem{BC-IB}
 S.~Bai, W.~Zhou, P.~Ding, W.~Zhao, D.~Wang, and B.~Chen, ``Rethinking latent
   redundancy in behavior cloning: an information bottleneck approach for robot
-  manipulation,'' in \emph{Proceedings of the 42nd International Conference on
-  Machine Learning (ICML)}, ser. Proceedings of Machine Learning Research, vol.
-  267.\hskip 1em plus 0.5em minus 0.4em\relax PMLR, 2025, pp. 2560--2580.
+  manipulation,'' in \emph{International Conference on Machine Learning
+  (ICML)}, 2025.
 
 \bibitem{Tobin2017}
 J.~Tobin, R.~Fong, A.~Ray, J.~Schneider, W.~Zaremba, and P.~Abbeel, ``Domain
@@ -171,14 +169,12 @@ C.~Li, J.~Liu, B.~Li, B.~Gao, Y.~Yuan, Y.~He \emph{et~al.}, ``{DTP}: A simple
 \bibitem{simplerenv}
 X.~Li, K.~Hsu, J.~Gu, K.~Pertsch, O.~Mees, H.~R. Walke \emph{et~al.},
   ``Evaluating real-world robot manipulation policies in simulation,'' in
-  \emph{Proceedings of The 8th Conference on Robot Learning (CoRL)}, ser.
-  Proceedings of Machine Learning Research, vol. 270.\hskip 1em plus 0.5em
-  minus 0.4em\relax PMLR, 2024.
+  \emph{Conference on Robot Learning (CoRL)}, 2024.
 
 \bibitem{ycb}
 B.~Calli, A.~Singh, A.~Walsman, S.~S. Srinivasa, P.~Abbeel, and A.~M. Dollar,
   ``The {YCB} object and model set: Towards common benchmarks for manipulation
-  research,'' in \emph{2015 International Conference on Advanced Robotics
-  (ICAR)}.\hskip 1em plus 0.5em minus 0.4em\relax IEEE, 2015, pp. 510--517.
+  research,'' in \emph{International Conference on Advanced Robotics (ICAR)},
+  2015.
 
 \end{thebibliography}
