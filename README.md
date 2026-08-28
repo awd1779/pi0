@@ -10,6 +10,16 @@ This project implements a **Mixture-of-Experts (MoE)-like architecture** using a
 
 ---
 
+## CGVD: Concept-Gated Visual Distillation (this fork)
+
+This fork additionally contains **CGVD**, a training-free inference-time perception wrapper
+for clutter-robust VLA manipulation, plus its full evaluation harness — see **[CGVD.md](CGVD.md)**
+for the code map and reproduction instructions. Core code: `src/cgvd/`; evaluation:
+`scripts/clutter_eval/`; statistics and experiment launch scripts: `analysis/`.
+Note: the repo's `control` distractor category corresponds to the paper's *Random* distractor type.
+
+---
+
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
