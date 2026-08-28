@@ -1,0 +1,461 @@
+Overcoming Visual Clutter in Vision Language Action Models via Concept-Gated Visual Distillation
+Sangmin Song1, Sarath Kodagoda1, Marc Carmichael1 and Karthick Thiyagarajan2
+
+Abstract— Vision-Language-Action (VLA) models demonstrate impressive zero-shot generalization but degrade sharply in cluttered scenes, a failure we term the “Precision-Reasoning Gap” and hypothesize to reflect background-induced feature dilution: semantically confusable clutter corrupting the visual grounding required for precise manipulation. We propose Concept-Gated Visual Distillation (CGVD), a training-free, model-agnostic inference-time framework that parses the instruction into safe and distractor sets, applies a two-layer target refinement—cross-validation and spatial disambiguation—that penalizes false positives, and removes the remaining distractor regions via image inpainting, preserving scene context outside the edited regions. Compared against the un-augmented π0 and GR00T policies in SimplerEnv, CGVD substantially improves robustness to semantic clutter—on put spoon on towel with 18 semantic distractors, π0’s success rate rises from 43.0% to 77.5% (Table III)—and, under descriptive compositional prompts, to attribute clutter. At the same condition, a vocabulary-matched reimplementation of the run-time intervention baseline BYOVLA reaches 32.5% at roughly 34× CGVD’s per-step cost. The protection is task- and distractortype-conditional: on put carrot on plate, where contextual clutter aids the baseline policies, CGVD provides no benefit at any tested density and often significantly underperforms them. Runtime compositing adds a measured ≈16 ms (+5%) per control step after a one-off per-episode initialization of 0.7– 3.3 s depending on scene complexity. These results support inference-time visual distillation as a practical defense against semantically confusable clutter for frozen VLA policies in static scenes.
+I. INTRODUCTION
+Vision-Language-Action (VLA) models [1]–[5] ground large language models into robotic control, enabling robots to follow open-vocabulary instructions like “Put spoon on towel” without task-specific training, and promising operation in unstructured, human-centric environments.
+However, a significant gap remains between the semantic reasoning capabilities of these models and their geometric precision in deployment conditions. While VLAs excel in curated, clutter-free environments, their performance degrades precipitously in the presence of visual clutter [6], [7]. We term this phenomenon the Precision-Reasoning Gap: the model successfully identifies the target object conceptually, yet fails to manipulate it precisely. We hypothesize that attention corruption from surrounding distractors dilutes the latent representation used for spatial planning [8]; under this hypothesis, feature dilution would manifest as high-variance
+1Sangmin Song, Sarath Kodagoda, and Marc Carmichael are with the University of Technology Sydney, NSW, Australia Sangmim.song@uts.edu.au
+2Karthick Thiyagarajan is with Western Sydney University, NSW, Australia K.Thiyagarajan@westernsydney.edu.au
+
+trajectories, hesitation near distractors, and ultimately manipulation failure. Our experiments (§IV) measure the endto-end effect of removing distractors; they do not directly instrument the attention mechanism, so we present this account as a working hypothesis rather than an established mechanism.
+Critically, this degradation is not uniform across distractor types. We observe that failure concentrates around distractors sharing visual or semantic properties with the target [6]. While VLAs may exhibit resilience to arbitrary clutter via large-scale pre-training, they remain brittle to semantically confusable objects; for example, a fork scattered near a target spoon triggers conflicting visual tokens within the same affordance category, causing the policy to attend to or even grasp the wrong object.
+Existing mitigations fall into three categories (§II): adaptation methods [8] fine-tune attention adapters, requiring architecture-specific retraining; inference-time interventions such as BYOVLA [9] identify distractors with a VLM (an external GPT-4o dependency) and probe per-region sensitivity with multiple VLA forward passes, with threshold-based target protection; and training-time augmentation [10]–[12] generates cluttered training data at the cost of retraining, without deployment-time guarantees.
+To bridge this gap without the cost of retraining, we propose Concept-Gated Visual Distillation (CGVD): a modelagnostic inference framework that leverages modern vision foundation models [13] to selectively restructure visual observations before they reach the VLA policy. CGVD parses the task instruction to identify target and anchor objects, segments both distractors and task-relevant entities independently, and uses set-theoretic subtraction to produce a distractor mask from which the target is excluded conditional on correct safe-set segmentation: the subtraction guarantees that no pixel segmented into the safe set is inpainted, but an object the segmenter fails to place in the safe set is not protected (§IV-D). Distractors are then replaced via inpainting [14], preserving the surrounding scene context.
+Our contributions are as follows: • Concept-Gated Visual Distillation (CGVD): We in-
+troduce a training-free, model-agnostic inference framework that selectively removes distractors from VLA observations via language-grounded segmentation and inpainting, while preserving scene context. • Interaction-Aware Masking Logic: a set-theoretic cross-validation pipeline that overcomes the semantic confusion of open-set segmenters (which score prompts independently), penalizing false positives and spatially
+
+Input “Put the spoon on towel”
+
+Stage 1: Instruction
+Parsing
+Task Objects Spoon Towel
+
+Stage 2: Dual Segmentation
+
+Stage 3: Gating + Inpaining
+
+Output VLA Policy
+
+Distractors fork scissors knife ...
+
+Robot Action
+
+Fig. 1. Overview of the CGVD pipeline. Stage 1: The language instruction is parsed to extract a safe set (target, anchor) and a distractor set. Stage 2: SAM 3 segments both sets independently, producing a safe-set mask and a distractor mask via dual-channel segmentation. Stage 3: Set-theoretic gating subtracts the safe-set mask from the distractor mask, and LaMa inpaints the resulting regions to produce a distilled observation passed to the VLA policy.
+
+disambiguating true targets from confusable distractors. • Systematic clutter-density evaluation: We evaluate
+CGVD on two VLAs (π0, GR00T) within the SimplerEnv benchmark over more than 20,000 episodes, comparing each policy with and without CGVD under matched seeds. CGVD prevents policy collapse under dense semantic clutter—reaching 77.5% success against the un-augmented policy’s 43.0% (π0, put spoon on towel, 18 semantic distractors; Table III)—and improves adherence to compositional attribute prompts, while underperforming the baseline on a task where contextual clutter aids the policy (§IV-B). Comparisons are against the un-augmented policies, plus a measured head-tohead against a vocabulary-matched reimplementation of BYOVLA [9] at the headline condition (§IV-E).
+II. RELATED WORK
+A. Vision-Language-Action Models
+VLA models such as RT-2 [2], OpenVLA [1], and Octo [3] leverage internet-scale vision-language pre-training for remarkable zero-shot generalization, yet struggle with highprecision geometric grounding in cluttered scenes [6], [7]. We hypothesize that the static patch resolution of ViT backbones [15] and the absence of coarse-to-fine zooming [16] make such architectures susceptible to feature dilution [6]: background clutter competing with task-relevant signals for representational capacity.
+B. Vision Foundation Models for Robotic Perception
+Vision Foundation Models such as SAM 3 [13] and GroundingDINO [17] localize objects from free-form text; robotics has mostly used them to add information—value maps [18], semantic maps [19], labeling [20], visual prompting [21]. We invert the paradigm, suppressing task-irrelevant regions instead: an information bottleneck only in an informal, analogical sense [22]—no learned rate–distortion tradeoff, just a hard pixel-space mask.
+C. Robustness via Adaptation and Training-Time Augmentation
+Clutter robustness has traditionally relied on domain randomization [23] and large-scale pre-training [24], [25], yet
+
+VLAs remain fragile to cluttered-scene shifts [26], [27]. Adaptation methods such as OBEYED-VLA [8] train attention layers to recover grounding, at the cost of architecturespecific retraining. Training-time augmentation generates cluttered or counterfactual data: ROSIE [10], GenAug [11], and NICE [12], whose pixel-space scene surgery is the closest prior to our core operation. CGVD performs a related pixel-space edit at inference time on a frozen policy: no retraining, instruction-adaptive, but inheriting run-time perception risk.
+D. Inference-Time Attention Intervention
+Distracting Token Pruning (DTP) [28] suppresses textmisaligned visual tokens in feature space; we conjecture such pruning struggles once distractor and target tokens are entangled by early self-attention, and instead intervene in pixel space, before tokenization. Unlike Visual Prompting [21], which adds information, we remove it. BYOVLA [9] also intervenes at run time; §IV-E reports a measured comparison.
+III. METHODOLOGY
+CGVD is a training-free, inference-time perception wrapper around any VLA policy (Fig. 1): given instruction l and observation ot ∈ RH×W×3, a distillation function φ produces oˆt = φ (ot , l) with distractors replaced by background, and the policy acts on at = π(oˆt , l). Since φ touches only the observation interface, it is architecture-agnostic. The key insight: the instruction already specifies which objects matter, and CGVD uses this signal to gate visual content.
+A. Concept-Gated Decomposition
+CGVD begins by parsing the language instruction l to extract a target concept ctgt and an anchor concept canc. For instance, “put spoon on towel” yields ctgt = spoon and canc = towel. These concepts define two sets:
+• The safe set S = {ctgt, canc}: entities that must remain visible. The robot arm is also always preserved, but it is handled through a separate proprioceptive channel (§IIIE–III-F) rather than through the segmentation-based safe-set mask.
+
+• The distractor set D = {d1, . . . , dK}: semantic categories to be treated as clutter (e.g., spatula, fork, knife).
+The safe set is derived deterministically from the instruction. The distractor set is not: it is an externally supplied vocabulary. In our experiments, D is re-derived at every episode reset from the category labels of the objects the evaluation protocol actually spawned in that episode (§IV-A)— i.e., CGVD receives the exact ground-truth clutter inventory, per episode. At deployment, D would have to be supplied by the integrator as a site-specific vocabulary or proposed by an external model. Where prior work uses an LLM to determine relevance [9], our parsing is deterministic and needs no API in this closed-vocabulary setting—a different point on a coverage-versus-cost trade-off, not a strict improvement. §IVD measures the dependence: a generic site-level vocabulary recovers the oracle gain in full; a vocabulary that misses the clutter forfeits it.
+
+B. Text-Prompted Instance Segmentation
+Both the safe set and distractor set are segmented from the observation using SAM 3 [13]. The two sets produce independent mask channels:
+
+Mdist = dk∈D SEG(ot , dk),
+
+(1)
+
+Msafe = SEG(ot , ctgt) ∪ SEG(ot , canc),
+
+(2)
+
+where SEG(ot , c) denotes the union of all instance masks returned by SAM 3 for concept c in observation ot . An important computational optimization is that the vision encoder is executed only once for the initialization frame (t = 0), with its masks reused across all frames of the episode.
+
+C. Two-Layer Target Refinement
+Open-set segmenters evaluate text prompts independently, so single-pass detection suffers semantic confusion: a spatula can yield high confidence for “spoon.” To ensure the true target survives distillation, we apply a two-layer refinement on the initial frame (t=0).
+Layer 1: Cross-Validation. To penalize distractors, we compute a genuineness score g(si) for each target instance si. This measures the confidence differential between its safeset and distractor identities:
+
+g(si) = σsafe(si) − max σdist(d j),
+
+(3)
+
+d j∈D
+
+IoU(si,d j)>η
+
+where σsafe and σdist are object confidences, and η is an IoU threshold (η = 0.30). When no distractor satisfies IoU(si, d j) > η—the common case for an isolated target— the maximum is defined as 0, so g(si) reduces to σsafe(si). Genuine targets yield g > 0, while imposters yield g < 0. Negative values are explicitly preserved to actively penalize false positives in the next layer.
+Layer 2: Spatial Disambiguation. Even after crossvalidation, the target mask may contain fragmented artifacts or multiple disjoint physical objects. To isolate the correct
+
+entity, we evaluate each connected component Ck using a composite score:
+
+score(Ck) = 1 + g∗(Ck) · σ ∗(Ck).
+
+(4)
+
+Here, g∗(Ck) is maximum genuineness, and σ ∗(Ck) is peak safe-set confidence. These factors jointly favor genuine and high-confidence components. Only the top-scoring component is retained; the pipeline therefore assumes a single target instance per scene (§V).
+For example, a spatula misidentified as “spoon” (σsafe=0.6) but correctly detected as “spatula” (σdist=0.9) receives g=−0.3 and a penalized composite score (1 − 0.3) · 0.6 = 0.42, letting the true spoon (high positive genuineness) outscore the imposter.
+
+D. Concept-Gated Mask Composition
+The refined masks are combined into a final inpainting mask via set-theoretic gating:
+
+Minp = dilate(Mdist, rd) \ dilate(Msafe, rs),
+
+(5)
+
+where rd is a distractor dilation radius, and rs ≥ rd is a safe-set dilation radius that creates a protective buffer; the implementation enforces rs ≥ rd by construction, and both are 11 px in our configuration. All masks are binarized with a threshold of 0.5 before dilation to eliminate soft-value artifacts.
+
+E. Clean Scene Generation via Inpainting
+We generate a single clean scene—an image of the workspace with distractors removed—by applying LaMa [14], a Fourier convolution-based inpainting model, to the initial frame. The inpainting mask is constructed as:
+
+Mlama = Minp ∪ dilate(Mrobot, re),
+
+(6)
+
+where Mrobot is the robot mask (obtained as described in §III-F) and re is a robot dilation radius (20 px). Including the robot region lets LaMa synthesize the background behind the arm, so that the cached clean scene contains no stale robot pixels once the arm moves. A consequence is that scene content occluded by the arm at t=0 is synthesized rather than observed for the remainder of the episode (§V). LaMa fills the masked regions with photorealistic background texture. The clean scene is computed once per episode and cached for all subsequent frames.
+
+F. Temporally Consistent Compositing
+At each timestep t > 0, the distilled observation is produced by alpha-blending the live camera frame with the cached clean scene:
+
+oˆt = α ⊙ oˆclean + (1 − α) ⊙ ot ,
+
+(7)
+
+where the compositing mask α ∈ [0, 1]H×W is computed once at t=0 and held fixed: the binarized, safe-set-gated distractor mask is feathered with a Gaussian blur (σ = 3.0), clamped to 1 in core distractor regions and 0 in the (dilated) target region. So that inpainting artifacts never obscure the arm, robot pixels are overwritten onto the composite every
+
+step—the only per-frame operation. In simulation this robot mask comes from SimplerEnv’s renderer segmentation buffer (per-link actor IDs): pixel-perfect, jitter-free, and simulationprivileged; §IV-D measures the cost of substituting a perframe SAM 3 prediction, and on hardware a forwardkinematics projection through the calibrated camera provides a deterministic, perception-free replacement.
+Two properties should be stated explicitly. First, oˆt is the only visual input the policy receives. Second, the characteristic failure mode of observation editing is false-positive erasure: an object misclassified as a distractor—or entering the workspace after t=0, where the fixed α can blend it toward the cached background—is removed from the policy’s view while remaining in the world, and the arm can collide with what it cannot see. Our evaluation is therefore scoped to static workspaces with no human entry, a fixed camera, and a known clutter vocabulary.
+IV. EXPERIMENTS
+We evaluate CGVD across two VLA architectures on tabletop manipulation tasks with controlled distractor injection. Our experiments address three questions: (1) Does CGVD improve clutter robustness across different VLA architectures and tasks? (2) How does performance scale with distractor density? (3) How do individual CGVD components contribute at the operating point tested?
+A. Experimental Setup
+Environment. We evaluate in SimplerEnv [29], whose real-to-sim correlation evidence supports policy-level transfer of our findings. It does not bound CGVD’s perceptionlevel risk: SAM 3 [13] and LaMa [14] were trained on real imagery and are applied here to rendered frames— itself a domain shift—and two pipeline inputs are simulationprivileged (the renderer robot mask, §III-F; the distractor vocabulary, §III-A). All conclusions are scoped to simulation (§V).
+All experiments use the WidowX robotic arm with a single fixed third-person camera, matching the Bridge dataset training setup. We test two Bridge dataset tasks: (1) put spoon on towel and (2) put carrot on plate.
+Policies. π0 refers to the open-source open-pi-zero reproduction of π0 [5], Bridge checkpoint bridge beta1; GR00T refers to nvidia/GR00T-N1.6-bridge [4]. Both are frozen; CGVD touches only their image input.
+Distractors. Following the distractor-type framing of [6], we evaluate three types: Semantic (high semantic proximity and shared visual characteristics with the target), Random (no similarity), and Attribute (same category and form, different physical properties). Assets come from RoboCasa [27] and YCB [30], placed collision-aware on a fixed 6 cm grid (one object per cell); an unplaceable object falls back to a collision-free random position or is hidden off-scene— episodes are never dropped. The vocabulary D is re-derived per episode from the actually-spawned assets’ category labels
+1github.com/allenzren/open-pi-zero
+
+(rc fork 0 → “fork”): it coincides exactly with each episode’s injected inventory (§III-A).
+Protocol. We report success rate (SR) via SimplerEnv’s built-in per-task predicate over 60-step episodes: 20 episodes × 10 seeds per condition (200 episodes; the attribute study of Table II uses 5 seeds), with matched seeds between arms. Seed s ∈ {0, . . . , 9} seeds the Python/NumPy/PyTorch RNGs; episode e uses canonical initial layout (s+e) mod 24 and distractor seed 104s + e, so both arms see identical initial states and clutter. Counts are sampled at {0, 4, 8, 10, 14, 18}; no episodes were excluded. We compare CGVD against the un-augmented policies throughout, and against a reimplementation of BYOVLA [9] at the headline condition (§IV-E); at the time of writing we found no public implementations of DTP [28] or OBEYED-VLA [8].
+Analysis. We report episode-level mean success rates with, as dispersion, the SD of the 10 per-seed rates; differences carry 95% CIs from the per-seed paired deltas (t9). Episodelevel clustering by seed is negligible (one-way ICC across all arms: median −0.02, max 0.06). The headline contrast— π0, put spoon on towel, 18 semantic distractors—is the single confirmatory comparison (∆ = +34.5 pp, 95% CI [+20.8, +48.2], paired t p = 3×10−4; Wilcoxon p = 0.002); all other contrasts are exploratory and unadjusted, and deltas whose CI contains zero are within run-to-run noise. The 0distractor cells are shared between the semantic and random conditions (physically identical). The one condition executed twice end-to-end (π0, carrot, random, 18) differed between batches by 3.0 pp (baseline) and 0.5 pp (CGVD), a direct run-to-run replication estimate.
+Implementation. All CGVD parameters, held fixed across every reported experiment: SAM 3 checkpoint facebook/sam3; LaMa big-lama (simple-lama-inpainting); confidence thresholds 0.30 (safe set) and 0.20 (distractors); η = 0.30; rd = rs = 11 px; re = 20 px; compositing σ = 3.0; mask binarization 0.5; minimum connected component 50 px; one warm-up frame; clean scene cached once per episode, never refreshed; SAM 3 prompts are the instruction’s noun phrases and the category labels of D. Values were selected on small pilot rollouts (primarily of the spoon task) during development and frozen before any reported evaluation run was executed (verified from version-control history). Code, configuration, and evaluation scripts are available at github.com/awd1779/pi0.
+B. Main Results
+Figure 2 plots success rate against distractor count (0–18); Table I reports the numbers with per-seed dispersion and paired CIs. Trends differ sharply by task and clutter type.
+On put spoon on towel, baseline performance degrades precipitously under semantically confusing clutter, and CGVD prevents this collapse: π0 gains +14.0 to +34.5 pp for n ≥ 4 and GR00T gains +11.0 to +13.5 pp for n ≥ 8, with every paired CI excluding zero. The gap widens with density: the per-seed slope of the CGVD−baseline difference is +1.54 pp per distractor for π0 (t(9)=5.54,
+
+PSutucScpeososnRoanteT(o%w)el
+
+100 Semantic Distractors
+
+Random Distractors
+
+80
+
+60
+
+40
+
+20
+
+0 100
+
+80
+
+60
+
+40
+
+20
+
+00
+
+4
+
+8 10 14 18 0
+
+4
+
+8 10 14 18
+
+Number of Distractors
+
+Number of Distractors
+
+0
+
+0 + CGVD (ours)
+
+GR00T
+
+GR00T + CGVD (ours)
+
+PSutucCcaersrsotRaotneP(la%t)e
+
+Fig. 2. Success rate vs. distractor count. Left: semantic; right: random distractors. Top: put spoon on towel; bottom: put carrot on plate. Dashed: baseline VLA; solid: +CGVD; colors denote architectures. Each point is the mean over 200 rollouts (20 episodes × 10 matched seeds) at counts {0, 4, 8, 10, 14, 18} (19,200 episodes total); 0-distractor points are shared between panels. Numeric values with dispersion and CIs: Table I.
+
+TABLE I MAIN RESULTS (NUMERIC). SUCCESS RATE (%), MEAN ± SD OVER 10 MATCHED SEEDS (200 EPISODES/CELL); ∆ WITH 95% CI FROM PER-SEED
+PAIRED DELTAS (t9 ), BOLD WHEN THE CI EXCLUDES ZERO. DATA OF FIG. 2.
+
+Semantic distractors
+
+Random distractors
+
+Task
+
+π0
+
+#D base +CGVD
+
+∆ [95% CI]
+
+GR00T
+
+base +CGVD
+
+∆ [95% CI]
+
+π0
+
+base +CGVD
+
+∆ [95% CI]
+
+GR00T
+
+base +CGVD
+
+∆ [95% CI]
+
+spoon on towel 0 82.0 85.0
+
++3.0 [-5.6,+11.6] 49.0 51.0
+
++2.0 [-6.1,+10.1] 82.0 85.0
+
++3.0 [-5.6,+11.6] 49.0 51.0
+
++2.0 [-6.1,+10.1]
+
+4 59.0 73.0
+
++14.0 [+5.4,+22.6] 47.5 46.0
+
+-1.5 [-8.7,+5.7] 70.5 78.0
+
++7.5 [-0.8,+15.8] 48.0 48.0
+
++0.0 [-7.0,+7.0]
+
+8 51.0 73.5 +22.5 [+10.7,+34.3] 28.5 41.0 +12.5 [+6.4,+18.6] 62.5 74.0
+
++11.5 [+1.7,+21.3] 44.0 43.5
+
+-0.5 [-12.5,+11.5]
+
+10 49.0 72.5 +23.5 [+12.8,+34.2] 29.5 43.0 +13.5 [+6.1,+20.9] 60.0 78.5 +18.5 [+10.2,+26.8] 41.0 47.0
+
++6.0 [-3.0,+15.0]
+
+14 52.5 75.5 +23.0 [+14.7,+31.3] 30.0 41.0 +11.0 [+3.3,+18.7] 64.5 77.5
+
++13.0 [+1.7,+24.3] 33.0 42.0
+
++9.0 [-0.9,+18.9]
+
+18 43.0 77.5 +34.5 [+20.8,+48.2] 31.0 43.5 +12.5 [+4.0,+21.0] 57.5 70.5
+
++13.0 [+2.0,+24.0] 28.0 45.0 +17.0 [+7.6,+26.4]
+
+carrot on plate 0 58.5 54.5
+
+-4.0 [-11.7,+3.7] 32.0 28.0
+
+-4.0 [-12.2,+4.2] 58.5 54.5
+
+-4.0 [-11.7,+3.7] 32.0 28.0
+
+-4.0 [-12.1,+4.1]
+
+4 57.5 52.5
+
+-5.0 [-11.5,+1.5] 41.5 32.0
+
+-9.5 [-12.1,-6.9] 56.0 53.0
+
+-3.0 [-10.8,+4.8] 36.5 30.0
+
+-6.5 [-16.5,+3.5]
+
+8 62.0 53.0
+
+-9.0 [-21.1,+3.1] 42.5 31.0
+
+-11.5 [-17.1,-5.9] 55.0 52.5
+
+-2.5 [-10.8,+5.8] 43.0 28.5
+
+-14.5 [-21.1,-7.9]
+
+10 61.5 53.5
+
+-8.0 [-15.0,-1.0] 42.5 29.0
+
+-13.5 [-20.7,-6.3] 56.0 55.0
+
+-1.0 [-10.7,+8.7] 40.0 28.5
+
+-11.5 [-18.7,-4.3]
+
+14 58.5 51.5
+
+-7.0 [-17.4,+3.4] 32.0 27.5
+
+-4.5 [-9.7,+0.7] 53.5 52.0
+
+-1.5 [-13.8,+10.8] 39.0 37.5
+
+-1.5 [-9.2,+6.2]
+
+18 56.0 47.0
+
+-9.0 [-17.7,-0.3] 32.0 28.5
+
+-3.5 [-10.0,+3.0] 49.5 54.0
+
++4.5 [-6.9,+15.9] 38.0 41.0
+
++3.0 [-3.6,+9.6]
+
+p<0.001) and +0.74 for GR00T (t(9)=2.77, p=0.02). Random clutter shows the same direction at high density (π0: +13.0 [+2.0, +24.0]; GR00T: +17.0 [+7.6, +26.4] at 18 distractors).
+Conversely, on put carrot on plate the baseline policies improve at moderate densities before degrading—plausibly because moderate contextual clutter better matches the objectrich scenes of their pre-training distributions, providing vi-
+
+sual anchors.
+Here CGVD never significantly outperforms the baseline and significantly underperforms it at several densities: π0’s semantic deltas span −4.0 to −9.0 pp (CIs exclude zero at n=10, 18), and GR00T loses −9.5 to −14.5 pp at moderate densities under both clutter types. When a task benefits from contextual clutter, masking deprives the VLA of useful anchors, and inpainting artifacts can disrupt spatial geometry:
+
+the intervention is task- and distractor-type-conditional, not universally beneficial.
+Qualitative attention visualizations consistent with the working hypothesis—extracted by hooking every selfattention layer of π0’s PaliGemma backbone and averaging final-query-token attention over the 256 SigLIP visual tokens across layers and heads—are provided in the code repository. We emphasize that such visualizations are entailed by the intervention itself (removing a distractor’s pixels removes attention on them) and that no attention statistic is measured in this paper; alternative explanations—such as CGVD restoring the observation toward the clutter-sparse Bridge training distribution, or simply deleting the wronggrasp option—are consistent with our data and are not ruled out. Indeed, the mean-color-fill ablation (§IV-D), in which removing the same semantic content with a cruder fill forfeits most of the gain, indicates that fill appearance, not distractor semantics alone, carries a large share of the effect.
+C. Fine-Grained Semantic Grounding
+The precision-reasoning gap is most acute when distractors share the target’s semantic class but differ in attributes: complex queries like “Put spoon with green handle on towel” are often reduced to a bag-of-words, entangling the target with fully green objects or dropping modifiers. We use the Attribute type (§IV-A): a green-handled spoon target among same-category spoons differing in color or material. We evaluate the baseline and CGVD across 0–4 attribute distractors using two prompt structures: Simple (“Put green spoon on towel”) and Complex (“Put spoon with green handle on towel”). CGVD receives the same instruction as the policy; its SAM 3 target prompt is the instruction’s attribute phrase (“green spoon” / “spoon with green handle”). Note the coverage asymmetry: the attribute type is evaluated on one task with π0 only, at 0–4 distractors, whereas Fig. 2 covers the semantic and random types on both tasks and both policies at 0–18 distractors. Generality claims for attribute clutter are correspondingly scoped.
+Table II reveals a two-sided dependence on descriptive density. The baseline degrades mildly with clutter under simple adjective-noun prompts (87.0% → 75.0%) but collapses on compositional queries (86.0% → 57.0%)—the bagof-words brittleness. For CGVD, the complex prompt is what unlocks the benefit: it holds a stable floor under the compositional query (73.0% at 4 distractors, ∆ = +16.0, the one delta whose CI excludes zero) because SAM 3 exploits the rich attribute phrase to isolate the correct instance, whereas under the simple prompt CGVD provides no reliable benefit (deltas −5.0 to +3.0, all within noise): “green spoon” gives the segmenter too little signal to separate the target from attribute-conflicting spoons. The bottleneck is the segmentation prompt: supplying the scene-informed phrase “spoon with green handle” under the simple instruction restores large gains (87.0/82.0/83.0 at 2–4 distractors vs. 79.0–70.0), but that phrasing encodes scene knowledge not derivable from the instruction, so the instruction-consistent numbers are primary. CGVD converts descriptive density
+
+TABLE II ATTRIBUTE DISTRACTOR SENSITIVITY ON put spoon on towel (π0, 100 EPISODES/CELL, 5 MATCHED SEEDS). ∆: 95% CI FROM PER-SEED PAIRED DELTAS; BOLD = CI EXCLUDES ZERO; OTHERWISE WITHIN
+RUN-TO-RUN NOISE.
+
+Simple Prompt
+
+Complex Prompt
+
+# Distractors π0 +CGVD
+
+∆ [95% CI]
+
+π0 +CGVD
+
+∆ [95% CI]
+
+0
+
+87.0 85.0
+
+-2.0 [-13.3,+9.3] 86.0 87.0
+
++1.0 [-5.8,+7.8]
+
+1
+
+79.0 80.0
+
++1.0 [-7.1,+9.1] 74.0 69.0
+
+-5.0 [-26.9,+16.9]
+
+2
+
+76.0 79.0 +3.0 [-14.9,+20.9] 69.0 77.0
+
++8.0 [-9.9,+25.9]
+
+3
+
+77.0 75.0 -2.0 [-20.4,+16.4] 64.0 74.0 +10.0 [-7.6,+27.6]
+
+4
+
+75.0 70.0 -5.0 [-24.6,+14.6] 57.0 73.0 +16.0 [+1.2,+30.8]
+
+TABLE III ABLATION STUDY (π0, put spoon on towel, 18 SEMANTIC DISTRACTORS; 200 EPISODES/ROW). ROWS REMOVE OR SUBSTITUTE ONE COMPONENT.
+SR: MEAN ± SD OVER PER-SEED RATES; ∆ VS. FULL PIPELINE WITH 95% CI FROM PAIRED DELTAS. BASELINE/FULL ROWS REUSE THE FIG. 2 RUNS; THE ROBOT-MASK EFFECT IS NOT DISTINGUISHABLE FROM ZERO.
+
+Configuration Baseline (no CGVD) CGVD (full pipeline)
+LaMa → mean-color fill – Two-layer target refinement – Robot mask protection
+
+SR (%) 43.0 ± 16.0 77.5 ± 6.3 56.5 ± 16.0 65.0 ± 8.8 73.0 ± 7.1
+
+∆ [95% CI] −34.5 [−48.2, −20.8]
+— −21.0 [−35.3, −6.7] −12.5 [−20.3, −4.7] −4.5 [−10.4, +1.4]
+
+into robustness; it does not rescue a prompt that lacks it. Given the 5-seed sample, per-cell values here are descriptive.
+D. Ablation Studies
+We ablate the pipeline at a single operating point—put spoon on towel, π0, 18 semantic distractors (Table III); π0’s higher success rates provide headroom to resolve component contributions. The attributions are claims about this operating point only: §IV-B shows the pipeline’s net effect reverses in other regimes.
+Removing the Two-Layer Target Refinement reduces SR from 77.5% to 65.0%: without cross-validation, genuine targets are erroneously inpainted out of the scene—CGVD’s own protection fails, which is why we call it conditional (§III-A). To quantify the residual failure rate of the full pipeline, we audited a fresh 200-episode re-execution of the headline condition against the renderer’s ground-truth target mask: the final inpainting mask overlapped the target at t=0 in 4 of 200 episodes (2.0%), and in all four cases the target was erased essentially completely. The protection is therefore strong but probabilistic in practice, differing from sensitivity-probe approaches in failure rate, not failure mode. (This re-execution also provides a replication of the headline cell: 76.0% vs. the original 77.5%.) Substituting a mean-color fill for LaMa incurs the largest single drop (56.5%) despite identical masks and removed content; we hypothesize (unmeasured) that the stark boundaries act like out-of-distribution patches to the ViT backbone. Notably, a majority of the gain at this operating point thus depends on how regions are filled, not on removal alone. Finally, removing Robot Mask Protection reduces SR to 73.0%; this −4.5 pp effect is not statistically distinguishable from zero at our sample size (95% CI [−10.4, +1.4]), so we treat robot-mask protection as qualitatively motivated—without it,
+
+the compositing mask occasionally and visibly occludes the robot arm—rather than as a measured gain.
+Deployable robot mask. To measure the cost of the renderer mask’s simulation privilege, we additionally ran the full pipeline with a per-frame SAM 3 prediction (prompt “robot arm”) replacing the renderer mask, on the same seeds. Success is statistically unchanged—74.0% vs. 76.0% for a ground-truth-mask re-execution (paired ∆ = −2.0 pp, 95% CI [−11.3, +7.3])—but the deployable path costs 240.7±1.9 ms per frame (dropping the control rate to ≈1.7 Hz) and SAM 3 returns no robot detection in 20.1% of frames, falling back to the previous mask. The simulation privilege is thus primarily a latency-and-reliability privilege rather than an accuracy one, and forward-kinematics projection (§III-F) remains the sensible hardware path.
+Vocabulary sensitivity. Since D coincides with the injected inventory (§III-A), we re-ran the headline condition (same seeds, CGVD arm) with two frozen vocabularies to measure that privilege. With a vocabulary that misses the injected clutter (D = {ladle, whisk, bowl, cup}), success collapses to 45.5%—statistically indistinguishable from the 43.0% baseline (paired ∆ vs. baseline +2.5, 95% CI [−6.6, +11.6]). With a generic 12-category tabletop vocabulary not derived from the injection list (utensils and tableware), success is 76.5%—statistically indistinguishable from the oracle vocabulary (∆ vs. oracle re-execution +0.5 [−4.7, +5.7]; vs. baseline +33.5 [+22.3, +44.7]). CGVD’s benefit therefore requires vocabulary coverage of the clutter, but not knowledge of the exact inventory: a plausible sitelevel vocabulary recovers the oracle-level gain in full, while a vocabulary miss forfeits it entirely.
+E. Comparison with a Run-Time Intervention Baseline
+We compare CGVD against BYOVLA [9], the closest prior run-time observation intervention, at the headline condition (same 10 matched seeds, 200 episodes), reimplementing it from its reference code with three substitutions chosen to remove confounds: GPT-4o replaced by the same closed vocabulary D CGVD receives, GroundingDINO+SAM2 by SAM 3 (shared with CGVD), and Octo’s fixed-key stochastic probe by fixed-seed π0 forward passes. The mechanism is kept faithful: per-object Gaussian-blur perturbation (random kernel 15–30), translation-only action deltas with the reference threshold (0.002 m, same physical units), sensitiveregion inpainting (dilation 10), re-run before every action chunk. The probe demonstrably discriminates here (mean 2.0 of 32.1 candidate regions flagged per chunk, range 0–16).
+The result is one-sided: BYOVLA reaches 32.5%—below the 43.0% baseline (∆ = −10.5, 95% CI [−25.7, +4.7]) and far below CGVD’s 77.5% (paired ∆ = −45.0 [−56.4, −33.6])—while each intervention costs 11.3 ± 2.0 s (∼33 policy forwards), roughly 34× CGVD’s total per-step cost. We see two causes: per-chunk re-segmentation and re-inpainting makes the background flicker across chunks (Table III’s mean-color-fill row shows the policy is highly sensitive to fill appearance—the instability CGVD’s cached clean plate avoids), and at 18 distractors the conservative
+
+threshold leaves most clutter in view. Two caveats: this is our reimplementation, not the authors’ system, and 18 dense distractors is well outside BYOVLA’s original regime (a real robot, a handful of distractors); we did not tune its threshold. The fair conclusion is that per-chunk probe-and-inpaint does not scale to dense clutter, not that the method fails in its intended regime.
+
+F. Latency Analysis
+CGVD concentrates its expensive operations (SAM 3, LaMa) on the initialization frame (t = 0); for t > 0 the system performs image compositing against the cached clean scene. Table IV reports timing measured on an NVIDIA A10G (23 GB) across the evaluation runs. The policy forward pass is unaffected (318.1 ± 6.6 ms baseline vs. 318.5 ± 5.5 ms under CGVD), and per-frame compositing adds 15.6 ± 0.4 ms, i.e. ≈+5% per control step (≈3.14 → 3.00 Hz). Initialization is a one-off per-episode cost that grows with the number of segmentation prompts: 0.68 ± 0.29 s in the attribute scenes (≤5 prompts) and ≈3.3 s in the 18-distractor scenes (derived from episode wall time), delaying the first action of each episode. The overhead is modest for the quasi-static tabletop tasks evaluated here; the startup delay remains a real cost for time-critical settings.
+
+TABLE IV SYSTEM LATENCY, MEASURED ON AN NVIDIA A10G ACROSS THE EVALUATION RUNS (MEAN ± SD OVER EPISODES; n IN PARENTHESES).
+CGVD CONCENTRATES SEGMENTATION AND INPAINTING AT t=0; RUNTIME COMPOSITING ADDS ≈5% PER STEP.
+
+Quantity
+Policy forward / step, baseline Policy forward / step, with CGVD CGVD compositing / frame (t > 0) Initialization (t = 0), ≤5 prompts Initialization (t = 0), 18-distractor scenes
+
+Measured 318.1 ± 6.6 ms (500 ep.) 318.5 ± 5.5 ms (1,100 ep.) 15.6 ± 0.4 ms (500 ep.) 0.68 ± 0.29 s (500 ep.) ≈3.3 s (wall-time derived)
+
+V. LIMITATIONS
+CGVD’s validity envelope is defined by the following assumptions and scope limits.
+Static scene. The clean scene is cached at t=0 and α is fixed (§III-F). A moved distractor desynchronizes the cache; worse, an object entering the workspace after t=0 can be blended toward the cached background and hidden from the policy while physically present—a hazard, not merely an accuracy loss, outside access-controlled workspaces. Continuous re-segmentation would remove this assumption but is prohibitive at control rate.
+Contextually informative clutter. On put carrot on plate CGVD never outperforms the baseline and significantly underperforms it at several densities (up to −14.5 pp for GR00T; §IV-B): the intervention is task- and distractor-typeconditional, and deciding when to distill is open future work.
+Simulation-only evaluation and privileged inputs. No real-robot experiment is reported, and two inputs are simulation-privileged: the renderer robot mask and the perepisode distractor inventory D. SAM 3 recall over D and
+
+LaMa fill fidelity on real textured scenes (the largest single factor in Table III) are unvalidated on hardware; the deployable per-frame SAM 3 robot mask is measured in simulation only (§IV-D), and FK projection on hardware is untested.
+Single target instance. Layer 2 retains only the topscoring component (§III-C); a scene with two genuine target instances would have one inpainted away.
+Occlusion fabrication and in-flight blending. Whatever the arm occluded at t=0 is synthesized, not observed, in the cached scene (Eq. 6); and since α protects the target only at its t=0 location, the moving target overlaps previously inpainted regions by >10% in 35% of audited episodes, exposing the grasped object to partial blending. Finally, initialization delays each episode’s first action by 0.7–3.3 s (Table IV).
+VI. CONCLUSION
+We introduced Concept-Gated Visual Distillation (CGVD), a training-free inference framework that mitigates the Precision-Reasoning Gap in VLA models via languagegrounded segmentation and inpainting, without architectural modification. Across more than 20,000 SimplerEnv episodes with π0 and GR00T, CGVD prevents performance collapse under dense semantic clutter and improves adherence to compositional attribute prompts, relative to the unaugmented policies; at the headline condition it outperforms a vocabulary-matched BYOVLA reimplementation by 45 pp at a small fraction of its per-step cost. The benefit is conditional: where contextual clutter aids the policy, CGVD never outperforms and often significantly underperforms the baseline. Bounded by static-background and closedvocabulary assumptions, these results position inference-time visual distillation as a practical defense against semantically confusable clutter in static scenes. Future work: real-time mask updating, intrusion detection over compositing regions, open-vocabulary D, and criteria for when to distill.
+REFERENCES
+[1] M. J. Kim, K. Pertsch, S. Karamcheti, T. Xiao, A. Balakrishna, S. Nair et al., “Openvla: An open-source vision-language-action model,” in Conference on Robot Learning (CoRL), 2024.
+[2] A. Brohan, N. Brown, J. Carbajal, Y. Chebotar, X. Chen, K. Choromanski et al., “Rt-2: Vision-language-action models transfer web knowledge to robotic control,” in Conference on Robot Learning (CoRL), 2023.
+[3] D. Ghosh, H. Walke, K. Pertsch, K. Black, O. Mees, S. Dasari et al., “Octo: An open-source generalist robot policy,” in Robotics: Science and Systems (RSS), 2024.
+[4] J. Bjorck, F. Castaneda, N. Cherniadev, X. Da, R. Ding, L. Fan et al., “Gr00t n1: An open foundation model for generalist humanoid robots,” arXiv preprint arXiv:2503.14734, 2025.
+[5] K. Black, N. Brown, D. Driess, A. Esmail, M. Equi, C. Finn et al., “π0: A vision-language-action flow model for general robot control,” in Robotics: Science and Systems (RSS), 2025.
+[6] A. Rasouli, M. Alban, S. Pakdamansavoji, Z. Li, Z. Zhang, A. Wu et al., “Distracted robot: How visual clutter undermine robotic manipulation,” arXiv preprint arXiv:2511.22780, 2025.
+[7] H. Liu, J. Long, J. Wu, J. Hou, H. Tang, T. Jiang et al., “Eva-VLA: Evaluating vision-language-action models’ robustness under realworld physical variations,” arXiv preprint arXiv:2509.18953, 2025.
+[8] K. Vo, T. Hanyu, Y. Ikebe, T. T. Pham, N. Chung, M. N. Vu et al., “Clutter-robust vision-language-action models through object-centric and geometry grounding,” arXiv preprint arXiv:2512.22519, 2025.
+
+[9] A. J. Hancock, A. Z. Ren, and A. Majumdar, “Run-time observation interventions make vision-language-action models more visually robust,” in IEEE International Conference on Robotics and Automation (ICRA), 2025.
+[10] T. Yu, T. Xiao, A. Stone, J. Tompson, A. Brohan, S. Wang et al., “Scaling robot learning with semantically imagined experience,” in Robotics: Science and Systems (RSS), 2023.
+[11] Q. Chen, S. Kiami, A. Gupta, and V. Kumar, “GenAug: Retargeting behaviors to unseen situations via generative augmentation,” in Robotics: Science and Systems (RSS), 2023.
+[12] S. Pakdamansavoji, M. Pourkeshavarz, A. Sigal, Z. Li, R. H. Yang, and A. Rasouli, “Improving robotic manipulation robustness via NICE scene surgery,” arXiv preprint arXiv:2511.22777, 2025.
+[13] N. Carion, L. Gustafson, Y.-T. Hu, S. Debnath, R. Hu, D. Suris et al., “Sam 3: Segment anything with concepts,” arXiv preprint arXiv:2511.16719, 2025.
+[14] R. Suvorov, E. Logacheva, A. Mashikhin, A. Remizova, A. Ashukha, A. Silvestrov et al., “Resolution-robust large mask inpainting with fourier convolutions,” in IEEE/CVF Winter Conference on Applications of Computer Vision (WACV), 2022.
+[15] M. Raghu, T. Unterthiner, S. Kornblith, C. Zhang, and A. Dosovitskiy, “Do vision transformers see like convolutional neural networks?” in Advances in Neural Information Processing Systems (NeurIPS), 2021.
+[16] S. James, K. Wada, T. Laidlow, and A. J. Davison, “Coarse-to-fine Q-Attention: efficient learning for visual robotic manipulation via discretisation,” in IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022.
+[17] S. Liu, Z. Zeng, T. Ren, F. Li, H. Zhang, J. Yang et al., “Grounding dino: Marrying dino with grounded pre-training for open-set object detection,” in European Conference on Computer Vision (ECCV), 2024.
+[18] W. Huang, C. Wang, R. Zhang, Y. Li, J. Wu, and L. Fei-Fei, “Voxposer: Composable 3d value maps for robotic manipulation with language models,” in Conference on Robot Learning (CoRL), 2023.
+[19] K. M. Jatavallabhula, A. Kuwajerwala, Q. Gu, M. Omama, T. Chen, A. Maalouf et al., “Conceptfusion: Open-set multimodal 3d mapping,” in Robotics: Science and Systems (RSS), 2023.
+[20] Y. Wang, Z. Xian, F. Chen, T.-H. Wang, Y. Wang, K. Fragkiadaki et al., “Robogen: Towards unleashing infinite data for automated robot learning via generative simulation,” in International Conference on Machine Learning (ICML), 2024.
+[21] Y. Li, Z. Gong, H. Li, X. Huang, H. Kang, G. Bai et al., “Robotic visual instruction,” in IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2025, pp. 12 155–12 165.
+[22] S. Bai, W. Zhou, P. Ding, W. Zhao, D. Wang, and B. Chen, “Rethinking latent redundancy in behavior cloning: an information bottleneck approach for robot manipulation,” in International Conference on Machine Learning (ICML), 2025.
+[23] J. Tobin, R. Fong, A. Ray, J. Schneider, W. Zaremba, and P. Abbeel, “Domain randomization for transferring deep neural networks from simulation to the real world,” in IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS), 2017.
+[24] H. Walke, K. Black, A. Lee, M. J. Kim, M. Du, C. Zheng et al., “Bridgedata v2: A dataset for robot learning at scale,” in Conference on Robot Learning (CoRL), 2023.
+[25] Open X-Embodiment Collaboration, “Open x-embodiment: Robotic learning datasets and rt-x models,” in IEEE International Conference on Robotics and Automation (ICRA), 2024.
+[26] W. Pumacay, I. Singh, J. Duan, R. Krishna, J. Thomason, and D. Fox, “The colosseum: A benchmark for evaluating generalization for robotic manipulation,” in Robotics: Science and Systems (RSS), 2024.
+[27] S. Nasiriany, A. Maddukuri, L. Zhang, A. Parikh, A. Lo, A. Joshi et al., “Robocasa: Large-scale simulation of everyday tasks for generalist robots,” in Robotics: Science and Systems (RSS), 2024.
+[28] C. Li, J. Liu, B. Li, B. Gao, Y. Yuan, Y. He et al., “DTP: A simple yet effective distracting token pruning framework for vision-language action models,” arXiv preprint arXiv:2601.16065, 2026.
+[29] X. Li, K. Hsu, J. Gu, K. Pertsch, O. Mees, H. R. Walke et al., “Evaluating real-world robot manipulation policies in simulation,” in Conference on Robot Learning (CoRL), 2024.
+[30] B. Calli, A. Singh, A. Walsman, S. S. Srinivasa, P. Abbeel, and A. M. Dollar, “The YCB object and model set: Towards common benchmarks for manipulation research,” in International Conference on Advanced Robotics (ICAR), 2015.
+
+
