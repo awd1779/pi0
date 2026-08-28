@@ -84,11 +84,6 @@ R.~Suvorov, E.~Logacheva, A.~Mashikhin \emph{et~al.}, ``Resolution-robust large
   mask inpainting with fourier convolutions,'' in \emph{IEEE/CVF Winter Conf.\
   on Applications of Computer Vision (WACV)}, 2022.
 
-\bibitem{voxposer}
-W.~Huang, C.~Wang, R.~Zhang \emph{et~al.}, ``Voxposer: Composable 3d value maps
-  for robotic manipulation with language models,'' in \emph{Conf.\ on Robot
-  Learning (CoRL)}, 2023.
-
 \bibitem{RoboticVisualInstruction}
 Y.~Li, Z.~Gong, H.~Li \emph{et~al.}, ``Robotic visual instruction,'' in
   \emph{IEEE/CVF Conf.\ on Computer Vision and Pattern Recognition (CVPR)},
@@ -99,19 +94,9 @@ S.~Bai, W.~Zhou, P.~Ding \emph{et~al.}, ``Rethinking latent redundancy in
   behavior cloning: an information bottleneck approach for robot
   manipulation,'' in \emph{Int.\ Conf.\ on Machine Learning (ICML)}, 2025.
 
-\bibitem{Tobin2017}
-J.~Tobin, R.~Fong, A.~Ray \emph{et~al.}, ``Domain randomization for
-  transferring deep neural networks from simulation to the real world,'' in
-  \emph{IEEE/RSJ Int.\ Conf.\ on Intelligent Robots and Systems (IROS)}, 2017.
-
 \bibitem{bridgedata}
 H.~Walke, K.~Black, A.~Lee \emph{et~al.}, ``Bridgedata v2: A dataset for robot
   learning at scale,'' in \emph{Conf.\ on Robot Learning (CoRL)}, 2023.
-
-\bibitem{open_x_embodiment}
-{Open X-Embodiment Collaboration}, ``Open x-embodiment: Robotic learning
-  datasets and rt-x models,'' in \emph{IEEE Int.\ Conf.\ on Robotics and
-  Automation (ICRA)}, 2024.
 
 \bibitem{robocasa}
 S.~Nasiriany, A.~Maddukuri, L.~Zhang \emph{et~al.}, ``Robocasa: Large-scale
@@ -130,6 +115,6 @@ X.~Li, K.~Hsu, J.~Gu \emph{et~al.}, ``Evaluating real-world robot manipulation
 \bibitem{ycb}
 B.~Calli, A.~Singh, A.~Walsman \emph{et~al.}, ``The {YCB} object and model set:
   Towards common benchmarks for manipulation research,'' in \emph{Int.\ Conf.\
-  Advanced Robotics (ICAR)}, 2015.
+  Adv.\ Robotics (ICAR)}, 2015.
 
 \end{thebibliography}

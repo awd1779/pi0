@@ -129,3 +129,7 @@ Author asked for (a) Fig. 1 (the qualitative teaser) back on page 1 and (b) a 7-
 - Bibliography set at scriptsize with venue abbreviations (flagged: deviates from raw template default; passes PaperPlaza's automated checks).
 - Figures rescaled (teaser 0.48 cw, pipeline banner 0.46 tw).
 Final: **exactly 7 pages**, 0 errors, 0 unresolved references, zero Type 3 fonts (ICRA-compliant). Note: at 7 pages only one extra-page fee applies instead of two.
+
+## Full-size figures at 7 pages (author request, 2026-08-28)
+Author requested Figs. 1–2 at original size (they had been shrunk to hit the 7-page cap). Restored: teaser at \columnwidth, pipeline banner at \textwidth. Funded by a final ~0.35-page condensation in the author's voice (no measured value or negative result removed), a compressed Policies paragraph (checkpoints and the N1-vs-N1.6 note moved into one footnote — kept because reviewers required checkpoint identification and the results come from the open-pi-zero reproduction / N1.6, not the cited originals), removal of two decorative citations (VoxPoser, Tobin et al. domain-randomization), and slightly tightened bibliography leading (scriptsize + linespread 0.93 — flagged as a template deviation that passes PaperPlaza's automated checks). Note recorded: ICRA reviewing is single-blind, so the code-availability statement citing the authors' own repo stands (an anonymized mirror is only needed if the venue's policy changes).
+Final: 7 pages, 0 errors, 0 unresolved references, zero Type 3 fonts.
