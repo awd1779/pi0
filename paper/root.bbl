@@ -22,54 +22,53 @@
 \BIBdecl
 
 \bibitem{openvla}
-M.~J. Kim, K.~Pertsch, S.~Karamcheti, T.~Xiao, A.~Balakrishna, S.~Nair
-  \emph{et~al.}, ``Openvla: An open-source vision-language-action model,'' in
-  \emph{Conference on Robot Learning (CoRL)}, 2024.
+M.~J. Kim, K.~Pertsch, S.~Karamcheti \emph{et~al.}, ``Openvla: An open-source
+  vision-language-action model,'' in \emph{Conf.\ on Robot Learning (CoRL)},
+  2024.
 
 \bibitem{rt2}
-A.~Brohan, N.~Brown, J.~Carbajal, Y.~Chebotar, X.~Chen, K.~Choromanski
-  \emph{et~al.}, ``Rt-2: Vision-language-action models transfer web knowledge
-  to robotic control,'' in \emph{Conference on Robot Learning (CoRL)}, 2023.
+A.~Brohan, N.~Brown, J.~Carbajal \emph{et~al.}, ``Rt-2: Vision-language-action
+  models transfer web knowledge to robotic control,'' in \emph{Conf.\ on Robot
+  Learning (CoRL)}, 2023.
 
 \bibitem{octo}
-D.~Ghosh, H.~Walke, K.~Pertsch, K.~Black, O.~Mees, S.~Dasari \emph{et~al.},
-  ``Octo: An open-source generalist robot policy,'' in \emph{Robotics: Science
-  and Systems (RSS)}, 2024.
+D.~Ghosh, H.~Walke, K.~Pertsch \emph{et~al.}, ``Octo: An open-source generalist
+  robot policy,'' in \emph{Robotics: Science and Systems (RSS)}, 2024.
 
 \bibitem{gr00t}
-J.~Bjorck, F.~Castaneda, N.~Cherniadev, X.~Da, R.~Ding, L.~Fan \emph{et~al.},
-  ``Gr00t n1: An open foundation model for generalist humanoid robots,''
-  \emph{arXiv preprint arXiv:2503.14734}, 2025.
+J.~Bjorck, F.~Castaneda, N.~Cherniadev \emph{et~al.}, ``Gr00t n1: An open
+  foundation model for generalist humanoid robots,'' \emph{arXiv preprint
+  arXiv:2503.14734}, 2025.
 
 \bibitem{pi0}
-K.~Black, N.~Brown, D.~Driess, A.~Esmail, M.~Equi, C.~Finn \emph{et~al.},
-  ``$\pi_0$: A vision-language-action flow model for general robot control,''
-  in \emph{Robotics: Science and Systems (RSS)}, 2025.
+K.~Black, N.~Brown, D.~Driess \emph{et~al.}, ``$\pi_0$: A
+  vision-language-action flow model for general robot control,'' in
+  \emph{Robotics: Science and Systems (RSS)}, 2025.
 
 \bibitem{distracted_robot}
-A.~Rasouli, M.~Alban, S.~Pakdamansavoji, Z.~Li, Z.~Zhang, A.~Wu \emph{et~al.},
-  ``Distracted robot: How visual clutter undermine robotic manipulation,''
-  \emph{arXiv preprint arXiv:2511.22780}, 2025.
+A.~Rasouli, M.~Alban, S.~Pakdamansavoji \emph{et~al.}, ``Distracted robot: How
+  visual clutter undermine robotic manipulation,'' \emph{arXiv preprint
+  arXiv:2511.22780}, 2025.
 
 \bibitem{eva_vla}
-H.~Liu, J.~Long, J.~Wu, J.~Hou, H.~Tang, T.~Jiang \emph{et~al.}, ``Eva-{VLA}:
-  Evaluating vision-language-action models' robustness under real-world
-  physical variations,'' \emph{arXiv preprint arXiv:2509.18953}, 2025.
+H.~Liu, S.~Ruan, J.~Long \emph{et~al.}, ``Eva-{VLA}: Evaluating
+  vision-language-action models' robustness under real-world physical
+  variations,'' \emph{arXiv preprint arXiv:2509.18953}, 2025.
 
 \bibitem{obeyed}
-K.~Vo, T.~Hanyu, Y.~Ikebe, T.~T. Pham, N.~Chung, M.~N. Vu \emph{et~al.},
-  ``Clutter-robust vision-language-action models through object-centric and
-  geometry grounding,'' \emph{arXiv preprint arXiv:2512.22519}, 2025.
+K.~Vo, T.~Hanyu, Y.~Ikebe \emph{et~al.}, ``Clutter-robust
+  vision-language-action models through object-centric and geometry
+  grounding,'' \emph{arXiv preprint arXiv:2512.22519}, 2025.
 
 \bibitem{byovla}
 A.~J. Hancock, A.~Z. Ren, and A.~Majumdar, ``Run-time observation interventions
   make vision-language-action models more visually robust,'' in \emph{IEEE
-  International Conference on Robotics and Automation (ICRA)}, 2025.
+  Int.\ Conf.\ on Robotics and Automation (ICRA)}, 2025.
 
 \bibitem{rosie}
-T.~Yu, T.~Xiao, A.~Stone, J.~Tompson, A.~Brohan, S.~Wang \emph{et~al.},
-  ``Scaling robot learning with semantically imagined experience,'' in
-  \emph{Robotics: Science and Systems (RSS)}, 2023.
+T.~Yu, T.~Xiao, A.~Stone \emph{et~al.}, ``Scaling robot learning with
+  semantically imagined experience,'' in \emph{Robotics: Science and Systems
+  (RSS)}, 2023.
 
 \bibitem{genaug}
 Q.~Chen, S.~Kiami, A.~Gupta, and V.~Kumar, ``Gen{A}ug: Retargeting behaviors to
@@ -82,99 +81,91 @@ S.~Pakdamansavoji, M.~Pourkeshavarz, A.~Sigal, Z.~Li, R.~H. Yang, and
   surgery,'' \emph{arXiv preprint arXiv:2511.22777}, 2025.
 
 \bibitem{sam3}
-N.~Carion, L.~Gustafson, Y.-T. Hu, S.~Debnath, R.~Hu, D.~Suris \emph{et~al.},
-  ``Sam 3: Segment anything with concepts,'' \emph{arXiv preprint
-  arXiv:2511.16719}, 2025.
+N.~Carion, L.~Gustafson, Y.-T. Hu \emph{et~al.}, ``Sam 3: Segment anything with
+  concepts,'' \emph{arXiv preprint arXiv:2511.16719}, 2025.
 
 \bibitem{lama}
-R.~Suvorov, E.~Logacheva, A.~Mashikhin, A.~Remizova, A.~Ashukha, A.~Silvestrov
-  \emph{et~al.}, ``Resolution-robust large mask inpainting with fourier
-  convolutions,'' in \emph{IEEE/CVF Winter Conference on Applications of
-  Computer Vision (WACV)}, 2022.
+R.~Suvorov, E.~Logacheva, A.~Mashikhin \emph{et~al.}, ``Resolution-robust large
+  mask inpainting with fourier convolutions,'' in \emph{IEEE/CVF Winter Conf.\
+  on Applications of Computer Vision (WACV)}, 2022.
 
 \bibitem{vit_analysis}
-M.~Raghu, T.~Unterthiner, S.~Kornblith, C.~Zhang, and A.~Dosovitskiy, ``Do
-  vision transformers see like convolutional neural networks?'' in
-  \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2021.
+M.~Raghu, T.~Unterthiner, S.~Kornblith \emph{et~al.}, ``Do vision transformers
+  see like convolutional neural networks?'' in \emph{Adv.\ in Neural
+  Information Processing Systems (NeurIPS)}, 2021.
 
 \bibitem{c2f_q_attention}
 S.~James, K.~Wada, T.~Laidlow, and A.~J. Davison, ``Coarse-to-fine
   {Q-Attention}: efficient learning for visual robotic manipulation via
-  discretisation,'' in \emph{IEEE/CVF Conference on Computer Vision and Pattern
+  discretisation,'' in \emph{IEEE/CVF Conf.\ on Computer Vision and Pattern
   Recognition (CVPR)}, 2022.
 
 \bibitem{groundingdino}
-S.~Liu, Z.~Zeng, T.~Ren, F.~Li, H.~Zhang, J.~Yang \emph{et~al.}, ``Grounding
-  dino: Marrying dino with grounded pre-training for open-set object
-  detection,'' in \emph{European Conference on Computer Vision (ECCV)}, 2024.
+S.~Liu, Z.~Zeng, T.~Ren \emph{et~al.}, ``Grounding dino: Marrying dino with
+  grounded pre-training for open-set object detection,'' in \emph{European
+  Conf.\ on Computer Vision (ECCV)}, 2024.
 
 \bibitem{voxposer}
-W.~Huang, C.~Wang, R.~Zhang, Y.~Li, J.~Wu, and L.~Fei-Fei, ``Voxposer:
-  Composable 3d value maps for robotic manipulation with language models,'' in
-  \emph{Conference on Robot Learning (CoRL)}, 2023.
+W.~Huang, C.~Wang, R.~Zhang \emph{et~al.}, ``Voxposer: Composable 3d value maps
+  for robotic manipulation with language models,'' in \emph{Conf.\ on Robot
+  Learning (CoRL)}, 2023.
 
 \bibitem{conceptfusion}
-K.~M. Jatavallabhula, A.~Kuwajerwala, Q.~Gu, M.~Omama, T.~Chen, A.~Maalouf
-  \emph{et~al.}, ``Conceptfusion: Open-set multimodal 3d mapping,'' in
-  \emph{Robotics: Science and Systems (RSS)}, 2023.
+K.~M. Jatavallabhula, A.~Kuwajerwala, Q.~Gu \emph{et~al.}, ``Conceptfusion:
+  Open-set multimodal 3d mapping,'' in \emph{Robotics: Science and Systems
+  (RSS)}, 2023.
 
 \bibitem{robogen}
-Y.~Wang, Z.~Xian, F.~Chen, T.-H. Wang, Y.~Wang, K.~Fragkiadaki \emph{et~al.},
-  ``Robogen: Towards unleashing infinite data for automated robot learning via
-  generative simulation,'' in \emph{International Conference on Machine
-  Learning (ICML)}, 2024.
+Y.~Wang, Z.~Xian, F.~Chen \emph{et~al.}, ``Robogen: Towards unleashing infinite
+  data for automated robot learning via generative simulation,'' in \emph{Int.\
+  Conf.\ on Machine Learning (ICML)}, 2024.
 
 \bibitem{RoboticVisualInstruction}
-Y.~Li, Z.~Gong, H.~Li, X.~Huang, H.~Kang, G.~Bai \emph{et~al.}, ``Robotic
-  visual instruction,'' in \emph{IEEE/CVF Conference on Computer Vision and
-  Pattern Recognition (CVPR)}, 2025, pp. 12\,155--12\,165.
+Y.~Li, Z.~Gong, H.~Li \emph{et~al.}, ``Robotic visual instruction,'' in
+  \emph{IEEE/CVF Conf.\ on Computer Vision and Pattern Recognition (CVPR)},
+  2025, pp. 12\,155--12\,165.
 
 \bibitem{BC-IB}
-S.~Bai, W.~Zhou, P.~Ding, W.~Zhao, D.~Wang, and B.~Chen, ``Rethinking latent
-  redundancy in behavior cloning: an information bottleneck approach for robot
-  manipulation,'' in \emph{International Conference on Machine Learning
-  (ICML)}, 2025.
+S.~Bai, W.~Zhou, P.~Ding \emph{et~al.}, ``Rethinking latent redundancy in
+  behavior cloning: an information bottleneck approach for robot
+  manipulation,'' in \emph{Int.\ Conf.\ on Machine Learning (ICML)}, 2025.
 
 \bibitem{Tobin2017}
-J.~Tobin, R.~Fong, A.~Ray, J.~Schneider, W.~Zaremba, and P.~Abbeel, ``Domain
-  randomization for transferring deep neural networks from simulation to the
-  real world,'' in \emph{IEEE/RSJ International Conference on Intelligent
-  Robots and Systems (IROS)}, 2017.
+J.~Tobin, R.~Fong, A.~Ray \emph{et~al.}, ``Domain randomization for
+  transferring deep neural networks from simulation to the real world,'' in
+  \emph{IEEE/RSJ Int.\ Conf.\ on Intelligent Robots and Systems (IROS)}, 2017.
 
 \bibitem{bridgedata}
-H.~Walke, K.~Black, A.~Lee, M.~J. Kim, M.~Du, C.~Zheng \emph{et~al.},
-  ``Bridgedata v2: A dataset for robot learning at scale,'' in \emph{Conference
-  on Robot Learning (CoRL)}, 2023.
+H.~Walke, K.~Black, A.~Lee \emph{et~al.}, ``Bridgedata v2: A dataset for robot
+  learning at scale,'' in \emph{Conf.\ on Robot Learning (CoRL)}, 2023.
 
 \bibitem{open_x_embodiment}
 {Open X-Embodiment Collaboration}, ``Open x-embodiment: Robotic learning
-  datasets and rt-x models,'' in \emph{IEEE International Conference on
-  Robotics and Automation (ICRA)}, 2024.
+  datasets and rt-x models,'' in \emph{IEEE Int.\ Conf.\ on Robotics and
+  Automation (ICRA)}, 2024.
 
 \bibitem{colosseum}
-W.~Pumacay, I.~Singh, J.~Duan, R.~Krishna, J.~Thomason, and D.~Fox, ``The
-  colosseum: A benchmark for evaluating generalization for robotic
-  manipulation,'' in \emph{Robotics: Science and Systems (RSS)}, 2024.
+W.~Pumacay, I.~Singh, J.~Duan \emph{et~al.}, ``The colosseum: A benchmark for
+  evaluating generalization for robotic manipulation,'' in \emph{Robotics:
+  Science and Systems (RSS)}, 2024.
 
 \bibitem{robocasa}
-S.~Nasiriany, A.~Maddukuri, L.~Zhang, A.~Parikh, A.~Lo, A.~Joshi \emph{et~al.},
-  ``Robocasa: Large-scale simulation of everyday tasks for generalist robots,''
-  in \emph{Robotics: Science and Systems (RSS)}, 2024.
+S.~Nasiriany, A.~Maddukuri, L.~Zhang \emph{et~al.}, ``Robocasa: Large-scale
+  simulation of everyday tasks for generalist robots,'' in \emph{Robotics:
+  Science and Systems (RSS)}, 2024.
 
 \bibitem{dtp}
-C.~Li, J.~Liu, B.~Li, B.~Gao, Y.~Yuan, Y.~He \emph{et~al.}, ``{DTP}: A simple
-  yet effective distracting token pruning framework for vision-language action
-  models,'' \emph{arXiv preprint arXiv:2601.16065}, 2026.
+C.~Li, J.~Liu, B.~Li \emph{et~al.}, ``{DTP}: A simple yet effective distracting
+  token pruning framework for vision-language action models,'' \emph{arXiv
+  preprint arXiv:2601.16065}, 2026.
 
 \bibitem{simplerenv}
-X.~Li, K.~Hsu, J.~Gu, K.~Pertsch, O.~Mees, H.~R. Walke \emph{et~al.},
-  ``Evaluating real-world robot manipulation policies in simulation,'' in
-  \emph{Conference on Robot Learning (CoRL)}, 2024.
+X.~Li, K.~Hsu, J.~Gu \emph{et~al.}, ``Evaluating real-world robot manipulation
+  policies in simulation,'' in \emph{Conf.\ on Robot Learning (CoRL)}, 2024.
 
 \bibitem{ycb}
-B.~Calli, A.~Singh, A.~Walsman, S.~S. Srinivasa, P.~Abbeel, and A.~M. Dollar,
-  ``The {YCB} object and model set: Towards common benchmarks for manipulation
-  research,'' in \emph{International Conference on Advanced Robotics (ICAR)},
-  2015.
+B.~Calli, A.~Singh, A.~Walsman \emph{et~al.}, ``The {YCB} object and model set:
+  Towards common benchmarks for manipulation research,'' in \emph{Int.\ Conf.\
+  on Advanced Robotics (ICAR)}, 2015.
 
 \end{thebibliography}
