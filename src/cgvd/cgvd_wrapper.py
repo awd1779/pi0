@@ -46,6 +46,8 @@ class CGVDWrapper(gym.Wrapper):
         robot_presence_threshold: float = 0.05,
         distractor_presence_threshold: float = 0.3,
         safeset_warmup_frames: int = 1,
+        robot_mask_source: str = "gt",
+        freeze_distractor_names: bool = False,
         # Compositing parameters
         blend_sigma: float = 3.0,
         lama_dilation: int = 11,
@@ -118,6 +120,16 @@ class CGVDWrapper(gym.Wrapper):
         self.distractor_names = distractor_names or []
         self.cache_distractor_once = cache_distractor_once
         self.robot_presence_threshold = robot_presence_threshold
+        # Robot-mask source: "gt" = renderer segmentation buffer (simulation-
+        # privileged, jitter-free); "sam3" = per-frame SAM3 prediction on the
+        # live frame (deployable path; adds per-frame latency, measured below).
+        self.robot_mask_source = robot_mask_source
+        self.robot_mask_times_ms: list = []
+        # When True, keep the caller-supplied vocabulary D verbatim instead of
+        # re-deriving it from the spawned objects at every reset (needed for
+        # out-of-vocabulary experiments; the default per-episode re-derivation
+        # gives CGVD the exact ground-truth clutter inventory).
+        self.freeze_distractor_names = freeze_distractor_names
         self.distractor_presence_threshold = distractor_presence_threshold
         self.safeset_warmup_frames = safeset_warmup_frames
         # Safe-set robustness parameters
@@ -146,6 +158,7 @@ class CGVDWrapper(gym.Wrapper):
         # Initialize LaMa inpainter using singleton (unless disabled for ablation)
         # Using singleton avoids redundant model loading when multiple CGVDWrapper
         # instances are created (e.g., in batch evaluation)
+        _init_t0 = time.time()
         if not self.disable_inpaint and not self.use_gt_background:
             from src.cgvd.lama_inpainter import get_lama_inpainter
             self.inpainter = get_lama_inpainter(device="cuda")
@@ -183,6 +196,8 @@ class CGVDWrapper(gym.Wrapper):
                 presence_threshold=presence_threshold,
             )
         self.parser = InstructionParser()
+        _init_ms = (time.time() - _init_t0) * 1000
+        print(f"[CGVD] Initialization complete ({_init_ms:.0f} ms)")
 
         # State - masks
         self.cached_mask: Optional[np.ndarray] = None
@@ -223,6 +238,10 @@ class CGVDWrapper(gym.Wrapper):
         self.total_cgvd_time: float = 0.0
         self.total_sam3_time: float = 0.0
         self.total_lama_time: float = 0.0
+        # Init (t=0) vs runtime (t>0) breakdown
+        self.init_time: float = 0.0  # Total time for warmup + first composite frame
+        self.runtime_cgvd_time: float = 0.0  # Accumulated CGVD time for t>0 frames
+        self.runtime_frame_count: int = 0  # Number of t>0 frames
 
 
     def _log(self, msg: str):
@@ -568,14 +587,17 @@ class CGVDWrapper(gym.Wrapper):
 
         # Update distractor names to match actually-spawned objects
         # (when randomize_per_episode=True, the spawned set changes each episode)
-        try:
-            spawned_names = self.env.get_cgvd_concept_names()
-            if spawned_names:
-                self.distractor_names = spawned_names
-                if self.verbose:
-                    print(f"[CGVD] Updated distractor names from spawned objects: {spawned_names}")
-        except AttributeError:
-            pass  # No DistractorWrapper in chain, keep static names
+        if not self.freeze_distractor_names:
+            try:
+                spawned_names = self.env.get_cgvd_concept_names()
+                if spawned_names:
+                    self.distractor_names = spawned_names
+                    if self.verbose:
+                        print(f"[CGVD] Updated distractor names from spawned objects: {spawned_names}")
+            except AttributeError:
+                pass  # No DistractorWrapper in chain, keep static names
+        else:
+            print(f"[CGVD] Distractor vocabulary FROZEN (override): {self.distractor_names}")
 
         # Clear cached state
         self.cached_mask = None
@@ -608,6 +630,9 @@ class CGVDWrapper(gym.Wrapper):
         self.total_cgvd_time = 0.0
         self.total_sam3_time = 0.0
         self.total_lama_time = 0.0
+        self.init_time = 0.0
+        self.runtime_cgvd_time = 0.0
+        self.runtime_frame_count = 0
 
         # Create episode-specific debug directory
         if self.save_debug_images:
@@ -621,12 +646,14 @@ class CGVDWrapper(gym.Wrapper):
         # The scene is already settled (distractor wrapper handles physics),
         # so env.step() is unnecessary and can cause the robot's PD controller
         # to push objects (e.g. spoon near gripper) out of position.
+        _init_t0 = time.time()
         if self.distractor_names and self.safeset_warmup_frames > 0:
             for i in range(self.safeset_warmup_frames):
                 self._apply_cgvd(obs)  # accumulate masks, skip compositing
 
         # First post-warmup frame: inpaint + composite (or just apply if no distractors)
         obs = self._apply_cgvd(obs)
+        self.init_time = time.time() - _init_t0
 
         return obs, info
 
@@ -879,9 +906,24 @@ class CGVDWrapper(gym.Wrapper):
                     print(f"[CGVD] Safe-set mask ({src}): {cov:.1f}% (frame {self.frame_count}, {status})")
 
             # Step 3b: Robot mask - tracked every frame
-            # Pixel-perfect mask from renderer segmentation (no SAM3)
+            # Pixel-perfect mask from renderer segmentation (no SAM3), or a
+            # per-frame SAM3 prediction when robot_mask_source == "sam3".
             if self.include_robot:
-                robot_mask = self._get_robot_mask_from_segmentation()
+                if self.robot_mask_source == "sam3":
+                    _rm_start = time.time()
+                    robot_mask = self.segmenter.segment(
+                        image, "robot arm",
+                        presence_threshold=self.robot_presence_threshold,
+                    )
+                    _rm_ms = (time.time() - _rm_start) * 1000
+                    self.robot_mask_times_ms.append(_rm_ms)
+                    print(f"[CGVD] SAM3_ROBOT_MASK frame={self.frame_count} ms={_rm_ms:.1f} "
+                          f"px={int((robot_mask > 0.5).sum())}")
+                    robot_mask = (robot_mask > 0.5).astype(np.float32)
+                    if robot_mask.sum() == 0:
+                        robot_mask = None
+                else:
+                    robot_mask = self._get_robot_mask_from_segmentation()
                 if robot_mask is not None:
                     self.safe_scores["robot"] = 1.0
                     self.last_robot_mask = robot_mask  # Store for compositing
@@ -943,6 +985,24 @@ class CGVDWrapper(gym.Wrapper):
 
         # Always track mask coverage (for verification / analysis)
         self.mask_coverage_pct = float(self.cached_mask.sum() / self.cached_mask.size * 100)
+
+        # GT-based erasure audit (simulation-only; parsed offline from cgvd.log).
+        # Reports what fraction of the true target's pixels fall inside the
+        # final inpainting mask, i.e. would be erased by distillation.
+        try:
+            seg = self._current_segmentation
+            base_env = self.env.unwrapped
+            if seg is not None:
+                actor_seg = seg[..., 1]
+                src = getattr(base_env, 'episode_source_obj', None)
+                if src is not None:
+                    gt_tgt = (actor_seg == src.id)
+                    n_tgt = int(gt_tgt.sum())
+                    if n_tgt > 0:
+                        er = float(np.logical_and(self.cached_mask > 0.5, gt_tgt).sum()) / n_tgt
+                        print(f"[CGVD] TARGET_ERASURE frac={er:.4f} target_px={n_tgt}")
+        except Exception:
+            pass
 
         seg_time = time.time() - seg_start
         if self.verbose:
@@ -1050,6 +1110,11 @@ class CGVDWrapper(gym.Wrapper):
         # Update timing stats
         self.last_cgvd_time = time.time() - cgvd_start
         self.total_cgvd_time += self.last_cgvd_time
+
+        # Track runtime (t>0) frames separately from init
+        if self.frame_count > self.safeset_warmup_frames + 1:
+            self.runtime_cgvd_time += self.last_cgvd_time
+            self.runtime_frame_count += 1
 
         # Get component timing from segmenter and inpainter
         if self.segmenter is not None:
@@ -1445,6 +1510,7 @@ class CGVDWrapper(gym.Wrapper):
             - avg_lama_time: Average LaMa time per frame
         """
         frame_count = max(1, self.frame_count)
+        runtime_frames = max(1, self.runtime_frame_count)
         return {
             "last_cgvd_time": self.last_cgvd_time,
             "last_sam3_time": self.last_sam3_time,
@@ -1455,4 +1521,8 @@ class CGVDWrapper(gym.Wrapper):
             "avg_cgvd_time": self.total_cgvd_time / frame_count,
             "avg_sam3_time": self.total_sam3_time / frame_count,
             "avg_lama_time": self.total_lama_time / frame_count,
+            # Init (t=0) vs runtime (t>0) breakdown
+            "init_time": self.init_time,
+            "avg_runtime_cgvd_time": self.runtime_cgvd_time / runtime_frames,
+            "runtime_frame_count": self.runtime_frame_count,
         }

@@ -509,19 +509,25 @@ def get_sam3_segmenter(
 
     if use_mock:
         if _mock_singleton is None:
+            t0 = time.time()
             _mock_singleton = MockSAM3Segmenter(**kwargs)
-            print("[SAM3] Created singleton MockSAM3Segmenter")
+            elapsed_ms = (time.time() - t0) * 1000
+            print(f"[SAM3] Created singleton MockSAM3Segmenter ({elapsed_ms:.0f} ms)")
         return _mock_singleton
 
     if use_server:
         if _sam3_client_singleton is None:
+            t0 = time.time()
             _sam3_client_singleton = SAM3ClientSegmenter(**kwargs)
-            print("[SAM3] Created singleton SAM3ClientSegmenter")
+            elapsed_ms = (time.time() - t0) * 1000
+            print(f"[SAM3] Created singleton SAM3ClientSegmenter ({elapsed_ms:.0f} ms)")
         return _sam3_client_singleton
 
     if _sam3_singleton is None:
+        t0 = time.time()
         _sam3_singleton = SAM3Segmenter(**kwargs)
-        print("[SAM3] Created singleton SAM3Segmenter")
+        elapsed_ms = (time.time() - t0) * 1000
+        print(f"[SAM3] Created singleton SAM3Segmenter ({elapsed_ms:.0f} ms)")
     return _sam3_singleton
 
 

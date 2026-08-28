@@ -25,10 +25,12 @@ def get_lama_inpainter(device: str = "cuda") -> "LamaInpainter":
     global _lama_singleton
 
     if _lama_singleton is None:
+        t0 = time.time()
         _lama_singleton = LamaInpainter(device=device)
         # Force lazy initialization to load the model now
         _lama_singleton._load_model()
-        print("[LaMa] Created singleton LamaInpainter")
+        elapsed_ms = (time.time() - t0) * 1000
+        print(f"[LaMa] Created singleton LamaInpainter ({elapsed_ms:.0f} ms)")
     return _lama_singleton
 
 
