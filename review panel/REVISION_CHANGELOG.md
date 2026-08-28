@@ -106,3 +106,13 @@ Every item ID is from `CGVD_REVISION_BRIEF.md`; findings are in the seat reports
 2. **Table II n0 (Complex baseline)**: printed v1 said 85.0; logs give 86.0 — unresolved 1 pt (documented in round 1).
 3. **Optional compute (brief-flagged)**: extending the attribute study (both arms) from 5 → 10 seeds (~2,000 episodes ≈ 6–7 h GPU) would firm up the Abstract's attribute claim. Say the word and I'll queue it.
 4. Public-repo exposure of `paper/` + `review panel/` on the pushed branches remains your call (from round 1).
+
+## Style-alignment pass (author request, 2026-08-28)
+Compared against the author's original draft (`review panel/overleaf_source_v2.zip`, byte-identical to the v1 baseline) and rewrote the revision-added text in the author's register: narrative connectives ("First…", "Conversely…", "This likely arises because…", "This suggests that…"), full sentences instead of compressed clause chains, and far fewer inline statistics. Specifically:
+- §IV-B (the passage the author flagged): per-condition numbers and CIs removed from prose — the table carries them; prose keeps only the two trend slopes and the narrative.
+- §IV-C: per-cell repeats removed (Table II carries them); the re-execution disclosure folded in naturally.
+- §IV-D/§IV-E: paragraphs rewritten as flowing prose; every measured number retained exactly once.
+- **Table IV (latency) deleted as redundant** — §IV-F's prose already narrated every value; it now carries all of them (means±SD, n, hardware) once. The §V startup sentence duplicating §IV-F was also removed, as was §V's duplicate of §VI's when-to-distill future-work point.
+- Em-dash chains, "The key insight:"-style colon constructions, telegraphic bullet phrasing, and stat-parentheticals reduced throughout; the author's signature sentences restored (e.g., the §I "promise a future" line, "Future work will explore…").
+- No caveat, negative result, or measured value was removed — only relocated to its single canonical home.
+Recompiled at exactly **8 pages**, 0 errors, 0 unresolved references.
