@@ -116,3 +116,6 @@ Compared against the author's original draft (`review panel/overleaf_source_v2.z
 - Em-dash chains, "The key insight:"-style colon constructions, telegraphic bullet phrasing, and stat-parentheticals reduced throughout; the author's signature sentences restored (e.g., the §I "promise a future" line, "Future work will explore…").
 - No caveat, negative result, or measured value was removed — only relocated to its single canonical home.
 Recompiled at exactly **8 pages**, 0 errors, 0 unresolved references.
+
+## ICRA format compliance check (2026-08-28)
+Verified: unmodified `ieeeconf.cls`; `letterpaper` 612×792 pt; 8 pages; `\pagestyle{empty}` (no page numbers); no geometry/margin modifications; PDF 1.5; table captions above / figure captions below; standard title/author/`\thanks` block. **Fixed one hard failure: `distractor_scaling.pdf` embedded four Type 3 DejaVu fonts (matplotlib default) — an automatic IEEE PDF-compliance reject. Converted the figure's text to outlines via ghostscript (`-dNoOutputFonts`; visually identical, same page box). Final PDF: 13 Type 1 + 2 CID TrueType, all embedded, zero Type 3.** Note for camera-ready: the bibliography is set at `\footnotesize` with tightened item spacing — common practice that passes Papercept's automated checks (page size/margins/fonts/count), flagged here for transparency.
