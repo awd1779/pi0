@@ -50,11 +50,6 @@ A.~Rasouli, M.~Alban, S.~Pakdamansavoji \emph{et~al.}, ``Distracted robot: How
   visual clutter undermine robotic manipulation,'' \emph{arXiv preprint
   arXiv:2511.22780}, 2025.
 
-\bibitem{eva_vla}
-H.~Liu, S.~Ruan, J.~Long \emph{et~al.}, ``Eva-{VLA}: Evaluating
-  vision-language-action models' robustness under real-world physical
-  variations,'' \emph{arXiv preprint arXiv:2509.18953}, 2025.
-
 \bibitem{obeyed}
 K.~Vo, T.~Hanyu, Y.~Ikebe \emph{et~al.}, ``Clutter-robust
   vision-language-action models through object-centric and geometry
@@ -89,36 +84,10 @@ R.~Suvorov, E.~Logacheva, A.~Mashikhin \emph{et~al.}, ``Resolution-robust large
   mask inpainting with fourier convolutions,'' in \emph{IEEE/CVF Winter Conf.\
   on Applications of Computer Vision (WACV)}, 2022.
 
-\bibitem{vit_analysis}
-M.~Raghu, T.~Unterthiner, S.~Kornblith \emph{et~al.}, ``Do vision transformers
-  see like convolutional neural networks?'' in \emph{Adv.\ in Neural
-  Information Processing Systems (NeurIPS)}, 2021.
-
-\bibitem{c2f_q_attention}
-S.~James, K.~Wada, T.~Laidlow, and A.~J. Davison, ``Coarse-to-fine
-  {Q-Attention}: efficient learning for visual robotic manipulation via
-  discretisation,'' in \emph{IEEE/CVF Conf.\ on Computer Vision and Pattern
-  Recognition (CVPR)}, 2022.
-
-\bibitem{groundingdino}
-S.~Liu, Z.~Zeng, T.~Ren \emph{et~al.}, ``Grounding dino: Marrying dino with
-  grounded pre-training for open-set object detection,'' in \emph{European
-  Conf.\ on Computer Vision (ECCV)}, 2024.
-
 \bibitem{voxposer}
 W.~Huang, C.~Wang, R.~Zhang \emph{et~al.}, ``Voxposer: Composable 3d value maps
   for robotic manipulation with language models,'' in \emph{Conf.\ on Robot
   Learning (CoRL)}, 2023.
-
-\bibitem{conceptfusion}
-K.~M. Jatavallabhula, A.~Kuwajerwala, Q.~Gu \emph{et~al.}, ``Conceptfusion:
-  Open-set multimodal 3d mapping,'' in \emph{Robotics: Science and Systems
-  (RSS)}, 2023.
-
-\bibitem{robogen}
-Y.~Wang, Z.~Xian, F.~Chen \emph{et~al.}, ``Robogen: Towards unleashing infinite
-  data for automated robot learning via generative simulation,'' in \emph{Int.\
-  Conf.\ on Machine Learning (ICML)}, 2024.
 
 \bibitem{RoboticVisualInstruction}
 Y.~Li, Z.~Gong, H.~Li \emph{et~al.}, ``Robotic visual instruction,'' in
@@ -143,11 +112,6 @@ H.~Walke, K.~Black, A.~Lee \emph{et~al.}, ``Bridgedata v2: A dataset for robot
 {Open X-Embodiment Collaboration}, ``Open x-embodiment: Robotic learning
   datasets and rt-x models,'' in \emph{IEEE Int.\ Conf.\ on Robotics and
   Automation (ICRA)}, 2024.
-
-\bibitem{colosseum}
-W.~Pumacay, I.~Singh, J.~Duan \emph{et~al.}, ``The colosseum: A benchmark for
-  evaluating generalization for robotic manipulation,'' in \emph{Robotics:
-  Science and Systems (RSS)}, 2024.
 
 \bibitem{robocasa}
 S.~Nasiriany, A.~Maddukuri, L.~Zhang \emph{et~al.}, ``Robocasa: Large-scale

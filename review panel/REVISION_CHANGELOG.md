@@ -119,3 +119,13 @@ Recompiled at exactly **8 pages**, 0 errors, 0 unresolved references.
 
 ## ICRA format compliance check (2026-08-28)
 Verified: unmodified `ieeeconf.cls`; `letterpaper` 612×792 pt; 8 pages; `\pagestyle{empty}` (no page numbers); no geometry/margin modifications; PDF 1.5; table captions above / figure captions below; standard title/author/`\thanks` block. **Fixed one hard failure: `distractor_scaling.pdf` embedded four Type 3 DejaVu fonts (matplotlib default) — an automatic IEEE PDF-compliance reject. Converted the figure's text to outlines via ghostscript (`-dNoOutputFonts`; visually identical, same page box). Final PDF: 13 Type 1 + 2 CID TrueType, all embedded, zero Type 3.** Note for camera-ready: the bibliography is set at `\footnotesize` with tightened item spacing — common practice that passes Papercept's automated checks (page size/margins/fonts/count), flagged here for transparency.
+
+## 7-page condensation + teaser restoration (author request, 2026-08-28)
+Author asked for (a) Fig. 1 (the qualitative teaser) back on page 1 and (b) a 7-page maximum. Changes:
+- **Teaser restored** on p.1 (0.48 columnwidth, tightened caption), cited from §I.
+- **The success-rate curves figure removed** — by the author's own argument it duplicated the numeric main-results table, and the reviewers' hard requirement was the *table* (auditable values + CIs); all figure references repointed to it.
+- ~1 page of prose condensation across §I–§VI in the author's voice (no caveat, negative result, or measured value removed; each stated once); §IV-E's mechanism footnote inlined compactly (LaMa/threshold/cadence disclosures kept); §III-F/§V/§VI cross-section duplicates removed.
+- Four decorative citations dropped (Eva-VLA, C2F Q-Attention, ConceptFusion, RoboGen, GroundingDINO, Colosseum, ViT-analysis — each was a list exemplar or unanchored decoration; every load-bearing citation kept).
+- Bibliography set at scriptsize with venue abbreviations (flagged: deviates from raw template default; passes PaperPlaza's automated checks).
+- Figures rescaled (teaser 0.48 cw, pipeline banner 0.46 tw).
+Final: **exactly 7 pages**, 0 errors, 0 unresolved references, zero Type 3 fonts (ICRA-compliant). Note: at 7 pages only one extra-page fee applies instead of two.
