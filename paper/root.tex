@@ -19,18 +19,26 @@
 \usepackage{amsmath} % assumes amsmath package installed
 \usepackage{amssymb}  % assumes amsmath package installed
 \usepackage{cite} % useful for handling multiple citations like \cite{a,b,c}
+
+% ICRA double-anonymous review toggle: \anonymoustrue for submission,
+% \anonymoustrue for the camera-ready build.
+\newif\ifanonymous
+\anonymoustrue
 % TODO: Update your Title here
 \title{\LARGE \bf
 Overcoming Visual Clutter in Vision Language Action Models via Concept-Gated Visual Distillation
 }
 
-% TODO: Update your Authors here
+\ifanonymous
+\author{Anonymous Submission}
+\else
 \author{Sangmin Song$^{1}$, Sarath Kodagoda$^{1}$, Marc Carmichael$^{1}$ and Karthick Thiyagarajan$^{2}$% <-this % stops a space
 \thanks{$^{1}$Sangmin Song, Sarath Kodagoda, and Marc Carmichael are with the University of Technology Sydney, NSW, Australia
         {\tt\small Sangmim.song@uts.edu.au }}%
 \thanks{$^{2}$Karthick Thiyagarajan is with Western Sydney University, NSW, Australia
         {\tt\small K.Thiyagarajan@westernsydney.edu.au}}%
 }
+\fi
 
 \begin{document}
 
@@ -196,7 +204,7 @@ All experiments use the WidowX arm with a single fixed third-person camera, matc
 
 \textbf{Analysis.} We report episode-level mean success rates with the SD of the 10 per-seed rates as dispersion; differences carry 95\% CIs from the per-seed paired deltas ($t_9$). Clustering by seed is negligible (one-way ICC across all arms: median $-0.02$, max $0.06$). The headline contrast---$\pi_0$, \textit{put spoon on towel}, 18 semantic distractors---is the single confirmatory comparison ($\Delta = +34.5$\,pp, 95\% CI $[+20.8, +48.2]$, paired $t$ $p = 3{\times}10^{-4}$); all other contrasts are exploratory, and deltas whose CI contains zero are within run-to-run noise. The 0-distractor cells are shared between the semantic and random conditions (physically identical), and the one condition executed twice end-to-end differed between batches by at most 3.0\,pp, a direct replication estimate.
 
-\textbf{Implementation.} All CGVD parameters, held fixed across every reported experiment: SAM~3 checkpoint \texttt{facebook/sam3}; LaMa big-lama (\texttt{simple-lama-inpainting}); confidence thresholds 0.30 (safe set) and 0.20 (distractors); $\eta = 0.30$; $r_d = r_s = 11$\,px; $r_e = 20$\,px; compositing $\sigma = 3.0$; mask binarization 0.5; minimum connected component 50\,px; one warm-up frame; clean scene cached once per episode; prompts are the instruction's noun phrases and $\mathcal{D}$'s category labels. Values were set on small pilot rollouts and frozen before all reported runs (verified from version-control history). Code, configuration, and evaluation scripts are available at \texttt{github.com/awd1779/pi0}.
+\textbf{Implementation.} All CGVD parameters, held fixed across every reported experiment: SAM~3 checkpoint \texttt{facebook/sam3}; LaMa big-lama (\texttt{simple-lama-inpainting}); confidence thresholds 0.30 (safe set) and 0.20 (distractors); $\eta = 0.30$; $r_d = r_s = 11$\,px; $r_e = 20$\,px; compositing $\sigma = 3.0$; mask binarization 0.5; minimum connected component 50\,px; one warm-up frame; clean scene cached once per episode; prompts are the instruction's noun phrases and $\mathcal{D}$'s category labels. Values were set on small pilot rollouts and frozen before all reported runs (verified from version-control history). \ifanonymous Code, configuration, and evaluation scripts will be publicly released upon acceptance.\else Code, configuration, and evaluation scripts are available at \texttt{github.com/awd1779/pi0}.\fi
 
 
 \subsection{Main Results}
@@ -209,7 +217,7 @@ Conversely, on \textit{put carrot on plate} the baseline policies improve slight
 
 Here CGVD never significantly outperforms the baseline, and at several densities it significantly underperforms it, most sharply for GR00T (Table~\ref{tab:main_numeric}). This suggests that when a task naturally benefits from contextual clutter, masking deprives the VLA of useful environmental reasoning, and inpainting artifacts can further disrupt spatial geometry; the intervention is therefore task- and distractor-type-conditional rather than universally beneficial.
 
-Qualitative attention visualizations consistent with this working hypothesis are provided in the code repository (final-query-token attention over the 256 SigLIP tokens, averaged across the PaliGemma backbone). Such visualizations are entailed by the intervention itself, since removing a distractor's pixels removes attention on them, and no attention statistic is measured in this paper; alternatives---restoring the observation toward the clutter-sparse Bridge training distribution, or simply deleting the wrong-grasp option---remain consistent with our data. Indeed, the mean-color-fill ablation in \S\ref{sec:ablation} indicates that fill appearance, rather than distractor semantics alone, carries a large share of the effect.
+Qualitative attention visualizations consistent with this working hypothesis are provided with the released code (final-query-token attention over the 256 SigLIP tokens, averaged across the PaliGemma backbone). Such visualizations are entailed by the intervention itself, since removing a distractor's pixels removes attention on them, and no attention statistic is measured in this paper; alternatives---restoring the observation toward the clutter-sparse Bridge training distribution, or simply deleting the wrong-grasp option---remain consistent with our data. Indeed, the mean-color-fill ablation in \S\ref{sec:ablation} indicates that fill appearance, rather than distractor semantics alone, carries a large share of the effect.
 
 \subsection{Fine-Grained Semantic Grounding}
 \label{sec:attribute}
