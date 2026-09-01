@@ -1,89 +1,106 @@
-# Real-Robot Qualitative Demo — Plan
+# Real-World Qualitative Demo — Step-by-Step Plan (UR3 + RTX 4070 laptop)
 
-Goal: a small, honest hardware demonstration that closes the paper's biggest stated gap
-("simulation-only evaluation," §V) at *qualitative* strength — one paragraph plus
-supplement clips, no statistical claims. Every reviewer seat listed this as the highest-value
-strengthening item, and the original project notes planned it ("do qualitative analysis with
-real robot").
+**Decision recorded**: rig = UR3 + fixed RGB camera + 4070 laptop (x86 → the existing Docker
+image runs unmodified). Because `bridge_beta` is Bridge/WidowX-trained, policy-level transfer
+to a UR3 is not credible zero-shot, so this is the **perception-level** demonstration: the CGVD
+pipeline running live on real scenes with the real arm in frame. It closes §V's stated gaps
+(SAM 3 recall on real clutter, LaMa fill fidelity on real textures, compositing stability,
+FK-projected robot masking on hardware) and is written into the paper strictly qualitatively.
 
-## What it must show (tied to the paper's open claims)
+The Gate-0 tool already exists: `scripts/cgvd_standalone.py` (folder of images in → per-image
+distilled output + masks out). No new code needed to start.
 
-1. **The pipeline runs on real images**: SAM 3 segments a real cluttered tabletop from the
-   generic vocabulary, LaMa produces a usable clean plate, compositing is stable over an
-   episode. This directly addresses §V's biggest unvalidated component (LaMa fill fidelity on
-   real textured scenes — the paper's own largest ablation factor).
-2. **The FK-projected robot mask works** — the deployment path §III-F/§IV-D argue for but
-   mark untested.
-3. **Behavioral effect (stretch goal, stage-gated)**: with a Bridge-like rig, baseline π0
-   confuses utensils under clutter while CGVD does not — mirroring Fig. 1 on hardware.
+---
 
-## Hardware prerequisites (ASK-AUTHOR: what do you have access to?)
+## Phase A — Desk work, no robot (½ day; can start today)
 
-| Item | Requirement | Why |
-|---|---|---|
-| Arm | **Interbotix WidowX-250 (6DOF)** | bridge_beta is Bridge-trained; any other embodiment near-guarantees policy failure. (The BYOVLA reference code drives a wx250s via the Interbotix ROS stack — reusable as the action-interface template, `$CLAUDE_JOB_DIR`-cloned copy exists.) |
-| Camera | Fixed third-person RGB (RealSense/USB), mounted to mimic the Bridge over-shoulder view | Policy is view-sensitive; §IV-A's envelope is "single fixed third-person camera" |
-| Scene | Table or toy-kitchen surface + real utensils (forks/knives/spatulas/scissors as semantic clutter), spoon + towel | Matches the headline task; Bridge-domain props improve transfer odds |
-| GPU | Any ≥12 GB near the robot (or stream frames to this A10G box) | π0 ~318 ms/forward; SAM3+LaMa at init only |
+**A1. Laptop environment** (choose one):
+   - *Easiest*: install Docker + nvidia-container-toolkit, `docker pull drodii/open-pi-zero:latest`
+     (~40 GB), clone `github.com/awd1779/pi0`, run with the repo bind-mounted (same pattern as
+     the sim evals). SAM 3 + LaMa need ~4–5 GB VRAM — comfortable on the 4070.
+   - *Slim*: python 3.10 venv with `torch` (cu12x), `transformers` (git main, for SAM 3),
+     `simple-lama-inpainting`, `opencv-python`, `pillow`; clone the repo; only `src/cgvd/` and
+     `scripts/cgvd_standalone.py` are needed for the perception track.
 
-## Integration work (code, before any robot time)
+**A2. Gate 0 — real-photo study**: take **15–20 photos** with the demo camera (or a phone):
+   real spoon + towel + utensil clutter (forks/knives/spatulas/scissors) at 3 densities
+   (~0/5/10 objects), tabletop framing similar to the intended camera view, fixed exposure.
+   Run:
+   ```
+   python scripts/cgvd_standalone.py \
+     --input_dir ~/photos --target "spoon" \
+     --distractors "fork. knife. spatula. scissors. ladle. whisk. plate. bowl. cup. mug. pan. pot"
+   ```
+   Inspect the outputs: does SAM 3 find the utensils (vocabulary recall)? does it protect the
+   spoon (safe-set)? are LaMa fills usable on the real table texture? Record timings.
+   *(Alternative: upload the photos to this session and I run it on the A10G the same day.)*
 
-1. **`scripts/real_eval.py` driver** (~1 day): camera capture → CGVD transform → π0 inference
-   → Interbotix action execution, mirroring `batch_eval.py`'s loop. Action de-normalization for
-   real WidowX exists in the Bridge/Interbotix ecosystem; the BYOVLA reference file shows the
-   exact wx250s command pattern.
-2. **FK robot mask** (~1–2 days): URDF + joint states → project link geometry through the
-   calibrated camera (ArUco/checkerboard extrinsics) → binary mask, as `robot_mask_source="fk"`
-   alongside the existing `gt`/`sam3` options. *Fallback that needs zero new code*: the
-   already-implemented `sam3` per-frame mask (241 ms/frame, 20% dropout — acceptable for a
-   qualitative demo, and honestly reportable either way).
-3. **Deployment vocabulary**: the sim-validated generic 12-category list (fork, knife, spatula,
-   scissors, ladle, whisk, plate, bowl, cup, mug, pan, pot) — no per-scene authoring, which is
-   itself the point (§IV-D's vocabulary result on hardware).
-4. **Pilot config check** (½ day): SAM 3 thresholds (0.30/0.20) sanity on real frames; LaMa
-   fill quality eyeball on 5–10 real cluttered photos *before* involving the robot at all.
-   (This photo-only step can happen this week with a phone camera — no robot needed — and
-   already produces supplement-grade evidence for point 1.)
+**A3. Threshold sanity**: if real-image confidences differ from sim, adjust
+   `--presence_threshold` / `--distractor_threshold` on the Gate-0 set only, note the values,
+   and freeze them before any robot work (mirrors the paper's frozen-parameters discipline).
 
-## Protocol (stage-gated)
+**Go/no-go**: if LaMa fills or vocabulary recall are unusable at Gate 0, stop and report that
+finding honestly — it costs one afternoon and is itself informative.
 
-- **Gate 0 — photos only (no robot)**: 10 real cluttered-tabletop photos → run the full
-  perception pipeline offline → inspect masks/fills/vocabulary hits. If LaMa fills are unusable,
-  we learn it for the cost of an afternoon.
-- **Gate 1 — policy sanity**: 10 clutter-free `put spoon on towel` episodes, baseline only.
-  Proceed to Gate 2 only if success ≳ 30%; otherwise the demo pivots to **perception-only**
-  (still valuable and publishable as such — the paper's hardware gap is perception-level).
-- **Gate 2 — paired qualitative comparison**: 10–15 layouts, each photographed, then run
-  baseline and CGVD on the *same* layout (manual reset between arms). ~8–10 semantic
-  distractors. Record: success, wrong-object grasps, collisions, raw video, distilled-view
-  video, per-episode debug panels, init/compositing timing on the real GPU.
-- **Extras worth 10 minutes each**: one vocabulary-miss episode (wrong vocabulary → near-empty
-  mask → the paper's one-line miss detector fires); one episode with a mid-episode intrusion
-  (demonstrates the stated static-scene hazard honestly — reviewers respect shown limitations).
+## Phase B — Rig bring-up (½–1 day)
 
-## Paper integration
+**B1. Camera**: fixed tripod/frame mount, third-person over-shoulder view of the workspace,
+   ≥640×480 RGB. **Disable auto-exposure/auto-white-balance** (compositing assumes a stable
+   background appearance; AE drift breaks the cache visually).
+**B2. UR3 link**: `ur_rtde` (pip) from the laptop; verify joint-state streaming and slow
+   scripted moveL trajectories over the table. Set conservative speed/force limits and the
+   controller's workspace box; e-stop within reach; nobody in frame (RAS anonymity + the
+   paper's own static-scene envelope).
+**B3. Hand–eye calibration** (for the FK mask): print a ChArUco board; capture ~15 poses of a
+   board fixed to the UR3 flange; solve with OpenCV `calibrateHandEye` → camera intrinsics +
+   camera-to-base extrinsics saved to yaml.
 
-- New short paragraph ("Real-robot qualitative demonstration") in §IV or folded into §V,
-  worded strictly qualitatively; clips into the supplement video.
-- If perception-only: report it as validating SAM 3/LaMa/compositing on real scenes while
-  leaving policy-level transfer future work — precisely narrows §V, never oversells.
-- Anonymity: no faces, no lab logos or identifiable posters in frame (RAS rules); shoot tight
-  on the table.
+## Phase C — FK robot mask (~1 day of desk coding; parallel with B)
 
-## Timeline estimate (part-time)
+**C1.** Implement `robot_mask_source="fk"` next to the existing `gt`/`sam3` options:
+   PyBullet in DIRECT mode with the UR3 URDF (`ur_description`), set live joint states from
+   RTDE, render a segmentation image from a virtual camera at the calibrated
+   intrinsics/extrinsics → binary robot mask → dilate by r_e. (The UR3's first-class URDF/ROS
+   support is why this is easy — easier than on a WidowX.)
+**C2.** Validate: overlay the FK mask on live frames across the workspace; nudge extrinsics
+   until visually tight; measure per-frame cost (expect ~5–15 ms — record it for the paper,
+   next to the 241 ms/frame SAM 3 alternative already measured in sim).
 
-| Step | Time |
+## Phase D — Live distillation episodes (½ day)
+
+**D1.** Demo driver (`scripts/real_demo.py`, I will write it; it is `cgvd_standalone.py`'s
+   pipeline + the wrapper's caching/compositing loop + FK mask): at t=0 parse "put the spoon
+   on the towel", segment safe set + the generic 12-category vocabulary, two-layer refinement,
+   LaMa clean plate; per frame composite + FK-mask overwrite; record raw | distilled
+   side-by-side at ~10 fps.
+**D2.** **10–15 layouts** at ~8–10 real utensil distractors. For each: photograph the layout,
+   then run one 20–30 s episode with the UR3 executing a scripted approach-and-sweep
+   trajectory over the scene (the moving arm is what stresses the FK mask and compositing).
+   Capture per episode: raw video, distilled video, 4-panel debug frames, init/per-frame
+   timings on the 4070.
+**D3.** Honesty extras (10 min each):
+   - *Vocabulary miss*: run one layout with a non-utensil vocabulary → near-empty mask →
+     log the mask-coverage number (the paper's one-line miss detector, demonstrated).
+   - *Intrusion*: drop a new object mid-episode → show it blending toward the cache — the
+     stated static-scene hazard, shown deliberately.
+   - *Erasure audit*: hand-review the panels; report "spoon masked in k of N layouts."
+
+## Phase E — Assembly (½ day)
+
+**E1.** Select clips into the supplement reel (tight table framing; no faces, logos, or
+   identifiable lab features — RAS double-anonymous rules apply to videos too).
+**E2.** Paper: one qualitative paragraph (§IV or §V): pipeline validated on real scenes with
+   the generic vocabulary; FK mask demonstrated at X ms/frame; timings on consumer hardware;
+   policy-level transfer requires a Bridge-compatible embodiment and remains future work.
+**E3.** Changelog entry + updated ASK-AUTHOR list.
+
+## Split of work
+
+| Who | What |
 |---|---|
-| Gate 0 photo study | 0.5 day (no robot; can start now) |
-| Driver + calibration | 1–2 days |
-| FK mask (or skip via sam3 fallback) | 0–2 days |
-| Gates 1–2 capture | 1 day |
-| Video edit + paper paragraph | 0.5 day |
+| You | Photos (A2), rig + calibration captures (B), robot episodes (D2–D3) |
+| Me (this session) | Gate-0 processing if you upload photos; `real_demo.py`; the FK-mask module (testable here in PyBullet with the UR3 URDF before it ever touches your rig); video assembly; paper paragraph |
 
-## What I need from you
-
-1. Confirm hardware: WidowX-250 access? Which camera? GPU near the robot, or stream to this box?
-2. If no WidowX exists, decide now to target the **perception-only** demo (Gate 0 + real-photo
-   study) — it needs only a phone camera and covers the most-attacked gap.
-3. 10–20 phone photos of a real cluttered tabletop (utensils + a spoon + a towel) to start
-   Gate 0 immediately — upload them here and I'll run the full pipeline on them today.
+## Shopping/prep list
+Printed ChArUco board (A4, rigid backing) · camera mount/tripod · real utensils (≥10:
+forks, knives, spatulas, scissors + a distinctive spoon) · a towel · USB/Ethernet to the UR3.
