@@ -239,7 +239,7 @@ def main():
     lines.append("% Mean success rate (%) ± SD across the 10 matched seeds (20 episodes/seed).")
     lines.append("\\begin{table*}[t]")
     lines.append("\\centering")
-    lines.append("\\caption{\\textbf{Main results (numeric).} Success rate (\\%), mean $\\pm$ SD over 10 matched seeds (200 episodes/cell); $\\Delta$ with 95\\% CI from per-seed paired deltas ($t_9$), bold when the CI excludes zero. Data of Fig.~\\ref{fig:scaling}.}")
+    lines.append("\\caption{\\textbf{Main results (numeric).} Success rate (\\%), mean $\\pm$ SD over 10 matched seeds (200 episodes/cell); $\\Delta$ with 95\\% CI from per-seed paired deltas ($t_9$), bold when the CI excludes zero.}")
     lines.append("\\label{tab:main_numeric}")
     lines.append("\\renewcommand{\\arraystretch}{1.05}")
     lines.append("\\resizebox{\\textwidth}{!}{%")
